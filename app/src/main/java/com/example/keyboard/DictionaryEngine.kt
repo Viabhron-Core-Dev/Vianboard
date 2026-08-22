@@ -1,0 +1,874 @@
+package com.example.keyboard
+
+import android.content.Context
+import kotlinx.coroutines.*
+import kotlinx.coroutines.sync.withLock
+import java.io.InputStream
+import com.example.logkeeper.TheLogKeeper
+import com.example.R
+
+class DictionaryEngine(private val context: Context, autoLoad: Boolean = true) {
+    
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    private val trie = TrieNode()
+    private val bigrams = java.util.concurrent.ConcurrentHashMap<String, MutableMap<String, Int>>()
+    private val trigrams = java.util.concurrent.ConcurrentHashMap<String, MutableMap<String, Int>>()
+    private val allWordsSet = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+    
+    // Static fallback lists for proactive suggestions
+    private val commonFallbackWords = listOf("I", "the", "and", "to", "you", "a", "is", "that", "it", "in")
+    private val staticBigrams = mapOf(
+        "how" to listOf("are", "to", "do", "much", "many"),
+        "what" to listOf("is", "are", "do", "to", "a"),
+        "i" to listOf("am", "have", "will", "do", "think", "don't", "can"),
+        "you" to listOf("are", "can", "will", "have", "know", "think"),
+        "in" to listOf("the", "a", "my", "this", "our"),
+        "on" to listOf("the", "a", "my", "this"),
+        "to" to listOf("the", "be", "do", "see", "get", "make"),
+        "the" to listOf("same", "first", "best", "only", "way", "time"),
+        "for" to listOf("the", "a", "me", "you"),
+        "of" to listOf("the", "a", "my", "this"),
+        "and" to listOf("the", "I", "a", "we", "then"),
+        "is" to listOf("a", "the", "not", "this"),
+        "it" to listOf("is", "was", "will", "can"),
+        "this" to listOf("is", "was", "will", "one"),
+        "we" to listOf("are", "can", "will", "have", "need"),
+        "they" to listOf("are", "were", "will", "have")
+    )
+    
+    private val personalDao: PersonalDictionaryDao by lazy {
+        ClipboardDatabase.getDatabase(context).personalDictionaryDao()
+    }
+
+    private var pendingLoads = java.util.concurrent.atomic.AtomicInteger(0)
+    var isReady = false
+        private set
+    var onReadyCallback: (() -> Unit)? = null
+
+    class TrieNode {
+        val children = java.util.concurrent.ConcurrentHashMap<Char, TrieNode>()
+        var isWord = false
+        var frequency = 0
+    }
+
+    companion object {
+        private const val CACHE_FORMAT_VERSION = 1
+        private val parseMutex = kotlinx.coroutines.sync.Mutex()
+    }
+
+    private fun getCacheFile(): java.io.File {
+        val cacheDir = java.io.File(context.filesDir, "dict_cache")
+        if (!cacheDir.exists()) cacheDir.mkdirs()
+        return java.io.File(cacheDir, "trie_cache.bin")
+    }
+
+    private fun writeTrieNode(out: java.io.DataOutputStream, node: TrieNode) {
+        out.writeBoolean(node.isWord)
+        out.writeInt(node.frequency)
+        out.writeInt(node.children.size)
+        for ((char, child) in node.children) {
+            out.writeChar(char.code)
+            writeTrieNode(out, child)
+        }
+    }
+
+    private fun saveCacheToDisk(sourceFileName: String, sourceFileSize: Long) {
+        val cacheFile = getCacheFile()
+        val tempFile = java.io.File(cacheFile.parentFile, "trie_cache.bin.tmp")
+        try {
+            java.io.DataOutputStream(java.io.BufferedOutputStream(tempFile.outputStream())).use { out ->
+                out.writeInt(CACHE_FORMAT_VERSION)
+                out.writeUTF(sourceFileName)
+                out.writeLong(sourceFileSize)
+
+                writeTrieNode(out, trie)
+
+                out.writeInt(bigrams.size)
+                for ((word, nextMap) in bigrams) {
+                    out.writeUTF(word)
+                    out.writeInt(nextMap.size)
+                    for ((nextWord, freq) in nextMap) {
+                        out.writeUTF(nextWord)
+                        out.writeInt(freq)
+                    }
+                }
+                
+                out.writeInt(allWordsSet.size)
+                for (word in allWordsSet) {
+                    out.writeUTF(word)
+                }
+            }
+            if (cacheFile.exists()) cacheFile.delete()
+            tempFile.renameTo(cacheFile)
+            TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "Cache written successfully. size=${cacheFile.length()} bytes, source=$sourceFileName")
+        } catch (e: Throwable) {
+            e.printStackTrace()
+            TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "Cache write skipped (not fatal): ${e.javaClass.simpleName}: ${e.message}")
+            try {
+                tempFile.delete()
+            } catch (inner: Throwable) {
+                // Best effort cleanup only, never let this throw further
+            }
+        }
+    }
+
+    private fun readTrieNode(input: java.io.DataInputStream): TrieNode {
+        val node = TrieNode()
+        node.isWord = input.readBoolean()
+        node.frequency = input.readInt()
+        val childCount = input.readInt()
+        repeat(childCount) {
+            val char = input.readChar()
+            node.children[char] = readTrieNode(input)
+        }
+        return node
+    }
+
+    private fun loadCacheFromDisk(expectedSourceFileName: String, expectedSourceFileSize: Long): Boolean {
+        val cacheFile = getCacheFile()
+        if (!cacheFile.exists()) {
+            TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "CACHE_MISS | reason=file_not_found")
+            return false
+        }
+        val startTime = System.currentTimeMillis()
+        return try {
+            java.io.DataInputStream(java.io.BufferedInputStream(cacheFile.inputStream())).use { input ->
+                val version = input.readInt()
+                if (version != CACHE_FORMAT_VERSION) {
+                    TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "CACHE_MISS | reason=version_mismatch")
+                    return false
+                }
+                val savedName = input.readUTF()
+                val savedSize = input.readLong()
+                if (savedName != expectedSourceFileName || savedSize != expectedSourceFileSize) {
+                    TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "CACHE_MISS | reason=source_mismatch")
+                    return false
+                }
+
+                val loadedTrie = readTrieNode(input)
+                val trieTime = System.currentTimeMillis() - startTime
+                TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "CACHE_TIMING | stage=trie | elapsed_ms=$trieTime")
+
+                val loadedBigrams = mutableMapOf<String, MutableMap<String, Int>>()
+                val bigramCount = input.readInt()
+                repeat(bigramCount) {
+                    val word = input.readUTF()
+                    val nextCount = input.readInt()
+                    val map = mutableMapOf<String, Int>()
+                    repeat(nextCount) {
+                        map[input.readUTF()] = input.readInt()
+                    }
+                    loadedBigrams[word] = map
+                }
+                val bigramsTime = System.currentTimeMillis() - startTime
+                TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "CACHE_TIMING | stage=bigrams | elapsed_ms=$bigramsTime")
+
+                val loadedWords = mutableSetOf<String>()
+                val wordCount = input.readInt()
+                repeat(wordCount) {
+                    loadedWords.add(input.readUTF())
+                }
+                val wordsTime = System.currentTimeMillis() - startTime
+                TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "CACHE_TIMING | stage=words | elapsed_ms=$wordsTime")
+
+                // Only commit after everything above succeeded with no exception
+                trie.children.clear()
+                trie.children.putAll(loadedTrie.children)
+                trie.isWord = loadedTrie.isWord
+                trie.frequency = loadedTrie.frequency
+
+                bigrams.clear()
+                bigrams.putAll(loadedBigrams)
+
+                allWordsSet.clear()
+                allWordsSet.addAll(loadedWords)
+
+                val elapsed = System.currentTimeMillis() - startTime
+                TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "CACHE_HIT | words=${loadedWords.size} | bigram_entries=${loadedBigrams.size} | time_ms=$elapsed")
+                true
+            }
+        } catch (e: Throwable) {
+            e.printStackTrace()
+            TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "CACHE_LOAD_FAILED | ${e.javaClass.simpleName}: ${e.message}")
+            false
+        }
+    }
+
+    init {
+        if (autoLoad) {
+            loadDefaultDictionary()
+        }
+    }
+    
+    private fun loadDefaultDictionary() {
+        pendingLoads.set(0)
+        isReady = true
+        scope.launch(Dispatchers.Main) {
+            onReadyCallback?.invoke()
+        }
+        loadImportedDictionaries()
+    }
+
+    suspend fun loadCombinedDictionary(inputStream: InputStream, sourceFileName: String, sourceFileSize: Long) {
+        withContext(Dispatchers.IO) {
+            parseMutex.withLock {
+                val startTime = System.currentTimeMillis()
+                var wordsParsed = 0
+                var trieWordsInserted = 0
+                var bigramsInserted = 0
+                val bigramWordCap = 3000
+                var wordsWithBigrams = 0
+                val wordsGrantedBigrams = mutableSetOf<String>()
+                val MAX_IN_MEMORY_WORDS = 12000
+
+                try {
+                    var currentWord: String? = null
+                    inputStream.bufferedReader().useLines { lines ->
+                        for (rawLine in lines) {
+                            val trimmedLine = rawLine.trim()
+                            if (trimmedLine.isBlank() || trimmedLine.startsWith("dictionary=")) continue
+
+                            if (trimmedLine.startsWith("word=")) {
+                                val parts = trimmedLine.removePrefix("word=").split(",")
+                                val word = parts.getOrNull(0)?.trim()
+                                if (word.isNullOrBlank()) continue
+                                val freq = parts.getOrNull(1)?.removePrefix("f=")?.trim()?.toIntOrNull() ?: 1
+
+                                currentWord = word
+                                wordsParsed++
+                                allWordsSet.add(word.lowercase())
+
+                                if (trieWordsInserted < MAX_IN_MEMORY_WORDS) {
+                                    insertWord(word, freq)
+                                    trieWordsInserted++
+                                }
+                            } else if (trimmedLine.startsWith("bigram=")) {
+                                val cw = currentWord ?: continue
+                                val bParts = trimmedLine.removePrefix("bigram=").split(",")
+                                val nextWord = bParts.getOrNull(0)?.trim()
+                                if (nextWord.isNullOrBlank()) continue
+                                val bFreq = bParts.getOrNull(1)?.removePrefix("f=")?.trim()?.toIntOrNull() ?: 1
+
+                                if (!wordsGrantedBigrams.contains(cw)) {
+                                    if (wordsWithBigrams >= bigramWordCap) continue
+                                    wordsGrantedBigrams.add(cw)
+                                    wordsWithBigrams++
+                                }
+                                val map = bigrams.getOrPut(cw) { mutableMapOf() }
+                                map[nextWord] = bFreq
+                                bigramsInserted++
+                            }
+                        }
+                    }
+
+                    saveCacheToDisk(sourceFileName, sourceFileSize)
+                } catch (e: Exception) {
+                    TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "IMPORT_ERROR | file=[unknown] | exception=[${e.javaClass.simpleName}] | message=[${e.message}]")
+                    e.printStackTrace()
+                } finally {
+                    val timeMs = System.currentTimeMillis() - startTime
+                    checkIfReady()
+                    android.util.Log.d("DictionaryEngine", "Combined dictionary loaded. bigrams.size=${bigrams.size}")
+                    TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "IMPORT_COMBINED_COMPLETE | words_parsed=[${wordsParsed}] | trie_inserted=[${trieWordsInserted}] | bigrams_inserted=[${bigramsInserted}] | bigram_words_capped=[${wordsWithBigrams}] | time_ms=[${timeMs}]")
+                }
+            }
+        }
+    }
+
+    private fun checkIfReady() {
+        if (pendingLoads.decrementAndGet() <= 0) {
+            isReady = true
+            scope.launch(Dispatchers.Main) {
+                onReadyCallback?.invoke()
+            }
+        }
+    }
+
+    private fun loadImportedDictionaries() {
+        scope.launch {
+            try {
+                val importsDir = java.io.File(context.filesDir, "imported_dicts")
+                val dirExists = importsDir.exists()
+                val isDir = importsDir.isDirectory
+                TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "IMPORT_SCAN_START | dir_exists=[${dirExists}] | is_directory=[${isDir}]")
+                
+                if (dirExists && isDir) {
+                    val files = importsDir.listFiles()?.filter { it.isFile }
+                    if (files != null && files.isNotEmpty()) {
+                        val names = files.joinToString(",") { it.name }
+                        TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "IMPORT_FILES_FOUND | count=[${files.size}] | names=[${names}]")
+                        
+                        pendingLoads.addAndGet(files.size)
+                        isReady = false
+                        for (file in files) {
+                            try {
+                                val firstLine = file.useLines { lines ->
+                                    lines.firstOrNull { it.isNotBlank() }
+                                }?.trim() ?: ""
+                                
+                                val truncatedFirstLine = if (firstLine.length > 80) firstLine.take(80) else firstLine
+                                val routedTo = if (firstLine.startsWith("dictionary=")) "combined" else "text"
+                                TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "IMPORT_FILE_START | name=[${file.name}] | size_bytes=[${file.length()}] | first_line=[${truncatedFirstLine}] | routed_to=[${routedTo}]")
+                                
+                                if (firstLine.startsWith("dictionary=")) {
+                                    if (!loadCacheFromDisk(file.name, file.length())) {
+                                        loadCombinedDictionary(file.inputStream(), file.name, file.length())
+                                    } else {
+                                        checkIfReady()
+                                    }
+                                } else {
+                                    loadTextDictionary(file.inputStream())
+                                }
+                            } catch (e: Exception) {
+                                TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "IMPORT_ERROR | file=[${file.name}] | exception=[${e.javaClass.simpleName}] | message=[${e.message}]")
+                                e.printStackTrace()
+                                checkIfReady()
+                            }
+                        }
+                    } else {
+                        TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "IMPORT_NO_FILES_FOUND")
+                    }
+                } else {
+                    TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "IMPORT_NO_FILES_FOUND")
+                }
+            } catch (e: Exception) {
+                TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "IMPORT_ERROR | file=[unknown] | exception=[${e.javaClass.simpleName}] | message=[${e.message}]")
+                e.printStackTrace()
+            }
+        }
+    }
+
+    // Parses a generic text dictionary file. 
+    // Supports either plain words (one per line) or word + frequency.
+    fun loadTextDictionary(inputStream: InputStream) {
+        scope.launch {
+            try {
+                var maxFreq = 50000 // Assuming lines are sorted by frequency descending (e.g. Google 10k)
+                inputStream.bufferedReader().useLines { lines ->
+                    for (line in lines) {
+                        val cleanLine = line.trim()
+                        if (cleanLine.isBlank() || cleanLine.startsWith("#")) continue
+                        
+                        val parts = cleanLine.split("\\s+".toRegex())
+                        val rawWord = parts[0]
+                        val word = rawWord.trim { it.isLetter().not() && it != '\'' }
+                        if (word.isBlank()) continue
+                        
+                        val freq = if (parts.size > 1) {
+                            parts[1].toIntOrNull() ?: maxFreq
+                        } else {
+                            maxFreq
+                        }
+                        
+                        insertWord(word, frequency = freq)
+                        if (maxFreq > 1) maxFreq--
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                checkIfReady()
+            }
+        }
+    }
+
+    fun wordExists(word: String): Boolean {
+        val lowerWord = word.lowercase()
+        
+        // 1. Check Trie (Hot cache)
+        var current: TrieNode? = trie
+        var foundInTrie = true
+        for (char in lowerWord) {
+            if (current == null || !current.children.containsKey(char)) {
+                foundInTrie = false
+                break
+            }
+            current = current.children[char]
+        }
+        if (foundInTrie && current?.isWord == true) return true
+
+        // 2. Fallback to in-memory set (synchronous, instant)
+        return allWordsSet.contains(lowerWord)
+    }
+
+    fun addToPersonalDictionary(word: String) {
+        scope.launch {
+            try {
+                val lowerWord = word.lowercase()
+                val existing = personalDao.getByShortcut(lowerWord)
+                if (existing == null) {
+                    val item = PersonalDictionaryItem(
+                        word = word,
+                        shortcut = lowerWord,
+                        frequency = 1
+                    )
+                    personalDao.insert(item)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    fun insertWord(word: String, frequency: Int = 1, prevWord: String? = null, prevPrevWord: String? = null) {
+        var current = trie
+        for (char in word) {
+            val c = char.lowercaseChar()
+            if (!current.children.containsKey(c)) {
+                current.children[c] = TrieNode()
+            }
+            current = current.children[c]!!
+        }
+        current.isWord = true
+        current.frequency += frequency
+        
+        // Update bigrams
+        if (prevWord != null) {
+            val nextWords = bigrams.getOrPut(prevWord) { java.util.concurrent.ConcurrentHashMap() }
+            nextWords[word] = nextWords.getOrDefault(word, 0) + frequency
+        }
+        
+        // Update trigrams
+        if (prevWord != null && prevPrevWord != null) {
+            val context = "$prevPrevWord $prevWord"
+            val nextWords = trigrams.getOrPut(context) { java.util.concurrent.ConcurrentHashMap() }
+            nextWords[word] = nextWords.getOrDefault(word, 0) + frequency
+        }
+    }
+
+    suspend fun forgetWord(word: String) {
+        val lowerWord = word.lowercase()
+        // 1. Delete from personal dictionary if it exists
+        try {
+            personalDao.getByShortcut(lowerWord)?.let { item ->
+                personalDao.delete(item)
+            }
+        } catch (e: Exception) { e.printStackTrace() }
+
+        // 2. Reduce frequency or mark as not a word in Trie
+        var current = trie
+        var found = true
+        for (char in lowerWord) {
+            if (!current.children.containsKey(char)) {
+                found = false
+                break
+            }
+            current = current.children[char]!!
+        }
+        if (found && current.isWord) {
+            current.frequency = -10000 // Effectively blacklist it
+            current.isWord = false
+        }
+    }
+
+    suspend fun getSuggestions(prefix: String, prevWord: String? = null, prevPrevWord: String? = null, limit: Int = 3): List<String> {
+        val results = mutableListOf<String>()
+        val seen = mutableSetOf<String>()
+        val lowerPrefix = prefix.lowercase()
+        
+        if (lowerPrefix.isNotEmpty()) {
+            // Check for Quick Phrase (shortcut)
+            val quickPhrase = try {
+                personalDao.getByShortcut(lowerPrefix)
+            } catch (e: Exception) { null }
+            
+            if (quickPhrase != null && quickPhrase.word.isNotBlank()) {
+                results.add(quickPhrase.word)
+                seen.add(quickPhrase.word)
+            }
+        }
+        
+        if (lowerPrefix.isEmpty()) {
+            // Next-word prediction using trigrams and bigrams
+            if (prevWord != null) {
+                if (prevPrevWord != null) {
+                    val context = "$prevPrevWord $prevWord"
+                    val triMatches = trigrams[context]?.entries?.sortedByDescending { it.value }?.map { it.key }
+                    if (triMatches != null) {
+                        for (w in triMatches) {
+                            if (seen.add(w)) results.add(w)
+                            if (results.size >= limit) return results
+                        }
+                    }
+                }
+                val biMatches = bigrams[prevWord]?.entries?.sortedByDescending { it.value }?.map { it.key }
+                if (biMatches != null) {
+                    for (w in biMatches) {
+                        if (seen.add(w)) results.add(w)
+                        if (results.size >= limit) return results
+                    }
+                }
+                
+                // Static fallback bigrams
+                val staticBiMatches = staticBigrams[prevWord]
+                if (staticBiMatches != null) {
+                    for (w in staticBiMatches) {
+                        if (seen.add(w)) results.add(w)
+                        if (results.size >= limit) return results
+                    }
+                }
+            }
+            
+            // Final fallback to common words if still empty
+            if (results.isEmpty()) {
+                for (w in commonFallbackWords) {
+                    if (seen.add(w)) results.add(w)
+                    if (results.size >= limit) return results
+                }
+            }
+            
+            return results
+        }
+        
+        // 1. Fetch personal suggestions
+        val personalWords = try {
+            personalDao.getSuggestions(lowerPrefix, limit).map { it.word }
+        } catch (e: Exception) {
+            emptyList()
+        }
+        
+        // 2. Fetch standard engine suggestions
+        val engineWords = getPrefixSuggestions(lowerPrefix, limit)
+        val boostedWords = if (prevWord != null && bigrams.containsKey(prevWord)) {
+            val contextMatches = bigrams[prevWord]?.keys ?: emptySet()
+            val (boosted, rest) = engineWords.partition { it in contextMatches }
+            boosted + rest
+        } else {
+            engineWords
+        }
+        
+        // Combine, prioritize personal, ensure unique
+        for (word in personalWords + boostedWords) {
+            if (seen.add(word)) {
+                results.add(word)
+                if (results.size >= limit) return results
+            }
+        }
+        
+        // 3. Fallback to main database if we still need more suggestions
+        if (results.size < limit) {
+            try {
+                val dbWords = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    ClipboardDatabase.getDatabase(context).dictionaryWordDao().getSuggestions(lowerPrefix, limit)
+                }
+                for (dbWord in dbWords) {
+                    if (seen.add(dbWord.word)) {
+                        results.add(dbWord.word)
+                        if (results.size >= limit) break
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        
+        return results
+    }
+
+    private fun getPrefixSuggestions(prefix: String, limit: Int): List<String> {
+        var current = trie
+        for (char in prefix) {
+            val c = char.lowercaseChar()
+            current = current.children[c] ?: return emptyList()
+        }
+
+        data class Entry(val node: TrieNode, val word: String)
+
+        val queue = java.util.PriorityQueue<Pair<Int, Entry>>(16, compareByDescending { it.first })
+        queue.add(Pair(current.frequency, Entry(current, prefix)))
+
+        val results = mutableListOf<Pair<String, Int>>()
+        var visited = 0
+        val maxVisit = 500
+
+        while (queue.isNotEmpty() && results.size < limit && visited < maxVisit) {
+            val (_, entry) = queue.poll() ?: break
+            visited++
+            if (entry.node.isWord && entry.word.length >= prefix.length) {
+                results.add(Pair(entry.word, entry.node.frequency))
+                if (results.size >= limit) break
+            }
+            for ((char, child) in entry.node.children) {
+                queue.add(Pair(child.frequency, Entry(child, entry.word + char)))
+            }
+        }
+
+        return results.sortedByDescending { it.second }.map { it.first }
+    }
+    
+    private val keyAdjacency = mapOf(
+        'q' to setOf('w', 'a'),
+        'w' to setOf('q', 'e', 'a', 's'),
+        'e' to setOf('w', 'r', 's', 'd'),
+        'r' to setOf('e', 't', 'd', 'f'),
+        't' to setOf('r', 'y', 'f', 'g'),
+        'y' to setOf('t', 'u', 'g', 'h'),
+        'u' to setOf('y', 'i', 'h', 'j'),
+        'i' to setOf('u', 'o', 'j', 'k'),
+        'o' to setOf('i', 'p', 'k', 'l'),
+        'p' to setOf('o', 'l'),
+        'a' to setOf('q', 'w', 's', 'z'),
+        's' to setOf('a', 'w', 'e', 'd', 'z', 'x'),
+        'd' to setOf('s', 'e', 'r', 'f', 'x', 'c'),
+        'f' to setOf('d', 'r', 't', 'g', 'c', 'v'),
+        'g' to setOf('f', 't', 'y', 'h', 'v', 'b'),
+        'h' to setOf('g', 'y', 'u', 'j', 'b', 'n'),
+        'j' to setOf('h', 'u', 'i', 'k', 'n', 'm'),
+        'k' to setOf('j', 'i', 'o', 'l', 'm'),
+        'l' to setOf('k', 'o', 'p'),
+        'z' to setOf('a', 's', 'x'),
+        'x' to setOf('z', 's', 'd', 'c'),
+        'c' to setOf('x', 'd', 'f', 'v'),
+        'v' to setOf('c', 'f', 'g', 'b'),
+        'b' to setOf('v', 'g', 'h', 'n'),
+        'n' to setOf('b', 'h', 'j', 'm'),
+        'm' to setOf('n', 'j', 'k')
+    )
+
+    private fun spatialPenalty(typed: String, candidate: String): Double {
+        if (typed.length != candidate.length) return 0.0
+        var penalty = 0.0
+        for (i in typed.indices) {
+            if (typed[i] != candidate[i]) {
+                val isAdjacent = keyAdjacency[typed[i]]?.contains(candidate[i]) == true
+                penalty += if (isAdjacent) 0.2 else 1.0
+            }
+        }
+        return penalty
+    }
+
+    fun getFuzzyCorrections(typed: String, limit: Int = 3, isIncognito: Boolean = false): List<String> {
+        val alpha = 0.05 // Controls how much frequency overrides raw edit distance
+        if (typed.length < 3) return emptyList() // too short to correct meaningfully
+        
+        val lowerTyped = typed.lowercase()
+        val candidates = mutableListOf<Pair<String, Int>>() // word to frequency
+        val maxEditDistance = if (typed.length <= 5) 1 else 2
+        val startTime = System.currentTimeMillis()
+        val timeCapMs = 150L // hard stop after 150ms regardless
+        
+        // Only search against words in the trie that share at least the first letter
+        // This bounds the search space dramatically
+        val firstChar = lowerTyped[0]
+        val firstNode = trie.children[firstChar]
+        
+        if (firstNode != null) {
+            // BFS through words starting with same first letter only
+            // Collect up to 3000 candidates from trie then compute edit distance
+            val wordCandidates = mutableListOf<Pair<String, Int>>()
+            collectWords(firstNode, firstChar.toString(), wordCandidates, 3000, startTime, timeCapMs)
+            
+            val elapsedCollect = System.currentTimeMillis() - startTime
+            if (elapsedCollect > timeCapMs) {
+                if (!isIncognito) TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "FUZZY_TIMEOUT | typed=$typed | time_ms=$elapsedCollect | partial_results=${wordCandidates.size}")
+            }
+            
+            if (wordCandidates.isNotEmpty()) {
+                // Compute edit distance for each candidate
+                for ((word, freq) in wordCandidates) {
+                    if (System.currentTimeMillis() - startTime > timeCapMs) {
+                        if (!isIncognito && elapsedCollect <= timeCapMs) { // log timeout if it happened during edit distance phase
+                            TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "FUZZY_TIMEOUT | typed=$typed | time_ms=${System.currentTimeMillis() - startTime} | partial_results=${wordCandidates.size}")
+                        }
+                        break
+                    }
+                    if (Math.abs(word.length - lowerTyped.length) > maxEditDistance) continue
+                    val dist = editDistance(lowerTyped, word)
+                    if (dist in 1..maxEditDistance && dist > 0) {
+                        // Exclude candidates that are significantly shorter than typed word
+                        // Prevents "th" from being suggested for "teh"
+                        if (word.length >= lowerTyped.length - 1) {
+                            candidates.add(Pair(word, freq))
+                        }
+                    }
+                }
+            }
+        }
+        
+        class CandidateScore(val word: String, val totalPenalty: Double, val lengthNormDist: Double, val spatialPenaltyValue: Double, val freq: Int)
+        
+        val scoredCandidates = candidates.map { (word, freq) ->
+            val lengthNormDist = editDistance(lowerTyped, word).toDouble() / word.length
+            val spatialPenaltyValue = spatialPenalty(lowerTyped, word)
+            val safeFreq = maxOf(1, freq).toDouble()
+            val totalPenalty = (lengthNormDist + spatialPenaltyValue) - (alpha * kotlin.math.ln(safeFreq))
+            CandidateScore(word, totalPenalty, lengthNormDist, spatialPenaltyValue, freq)
+        }.sortedBy { it.totalPenalty }
+
+        scoredCandidates.take(5).forEach {
+            if (!isIncognito) {
+                TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "CANDIDATE_SCORE | word=${it.word} | total=${it.totalPenalty} | length_norm_dist=${it.lengthNormDist} | spatial=${it.spatialPenaltyValue} | freq=${it.freq}")
+            }
+        }
+
+        val results = scoredCandidates
+            .take(limit)
+            .map { it.word }
+            .toMutableList()
+            
+        var usedFallback = false
+        if (results.isEmpty() || editDistance(lowerTyped, results[0]) > 1) {
+            val len = lowerTyped.length
+            var foundFallback: String? = null
+            
+            // 1. Transpositions
+            for (i in 0 until len - 1) {
+                val p = lowerTyped.substring(0, i) + lowerTyped[i + 1] + lowerTyped[i] + lowerTyped.substring(i + 2)
+                if (allWordsSet.contains(p)) { foundFallback = p; break }
+            }
+            
+            // 2. Deletions
+            if (foundFallback == null) {
+                for (i in 0 until len) {
+                    val p = lowerTyped.substring(0, i) + lowerTyped.substring(i + 1)
+                    if (allWordsSet.contains(p)) { foundFallback = p; break }
+                }
+            }
+            
+            // 3. Substitutions
+            if (foundFallback == null) {
+                for (i in 0 until len) {
+                    for (c in 'a'..'z') {
+                        if (c != lowerTyped[i]) {
+                            val p = lowerTyped.substring(0, i) + c + lowerTyped.substring(i + 1)
+                            if (allWordsSet.contains(p)) { foundFallback = p; break }
+                        }
+                    }
+                    if (foundFallback != null) break
+                }
+            }
+            
+            // 4. Insertions
+            if (foundFallback == null) {
+                for (i in 0..len) {
+                    for (c in 'a'..'z') {
+                        val p = lowerTyped.substring(0, i) + c + lowerTyped.substring(i)
+                        if (allWordsSet.contains(p)) { foundFallback = p; break }
+                    }
+                    if (foundFallback != null) break
+                }
+            }
+            
+            if (foundFallback != null) {
+                usedFallback = true
+                results.remove(foundFallback)
+                results.add(0, foundFallback)
+                while (results.size > limit) {
+                    results.removeAt(results.size - 1)
+                }
+            }
+        }
+        
+        if (!isIncognito) {
+            val elapsed = System.currentTimeMillis() - startTime
+            val source = if (usedFallback) "fallback" else "trie"
+            TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "FUZZY_SEARCH | typed=$typed | candidates_found=${results.size} | time_ms=$elapsed | source=$source")
+        }
+        
+        return results
+    }
+
+    private fun collectWords(
+        node: TrieNode,
+        current: String,
+        results: MutableList<Pair<String, Int>>,
+        maxResults: Int,
+        startTime: Long,
+        timeCapMs: Long
+    ) {
+        if (System.currentTimeMillis() - startTime > timeCapMs) return
+        if (results.size >= maxResults) return
+        if (node.isWord && node.frequency > 0) {
+            results.add(Pair(current, node.frequency))
+        }
+        for ((char, child) in node.children) {
+            if (results.size >= maxResults) break
+            if (System.currentTimeMillis() - startTime > timeCapMs) break
+            collectWords(child, current + char, results, maxResults, startTime, timeCapMs)
+        }
+    }
+
+    fun editDistance(a: String, b: String): Int {
+        val m = a.length
+        val n = b.length
+        val dp = Array(m + 1) { IntArray(n + 1) }
+        for (i in 0..m) dp[i][0] = i
+        for (j in 0..n) dp[0][j] = j
+        for (i in 1..m) {
+            for (j in 1..n) {
+                dp[i][j] = if (a[i-1] == b[j-1]) {
+                    dp[i-1][j-1]
+                } else {
+                    1 + minOf(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])
+                }
+            }
+        }
+        // Also check transposition (swapped adjacent letters)
+        if (m == n) {
+            for (i in 1 until m) {
+                if (a[i] == b[i-1] && a[i-1] == b[i]) {
+                    val transposeDist = dp[m][n] - 1
+                    if (transposeDist < dp[m][n]) return transposeDist
+                }
+            }
+        }
+        return dp[m][n]
+    }
+
+    // HeliBoard dictionary parsing blueprint (placeholder for actual implementation)
+    fun loadHeliBoardDictionary(inputStream: InputStream) {
+        scope.launch {
+            try {
+                // To be implemented: parsing binary/text HeliBoard format
+                // 1. Read header (magic bytes, version)
+                // 2. Read word list + frequency
+                // 3. For each word, insertWord(word, frequency)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    // Load lightweight Transformer Model (placeholder)
+    fun loadTransformerModel(inputStream: InputStream) {
+        scope.launch {
+            try {
+                // To be implemented: load TFLite model from input stream
+                // Configure tensor shapes, setup interpreter
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+
+    suspend fun migrateWordsToDatabase(inputStream: InputStream) {
+        withContext(Dispatchers.IO) {
+            val dao = ClipboardDatabase.getDatabase(context).dictionaryWordDao()
+            val batch = mutableListOf<DictionaryWordEntity>()
+            var totalInserted = 0
+            inputStream.bufferedReader().useLines { lines ->
+                for (rawLine in lines) {
+                    val trimmedLine = rawLine.trim()
+                    if (!trimmedLine.startsWith("word=")) continue
+                    val parts = trimmedLine.removePrefix("word=").split(",")
+                    val word = parts.getOrNull(0)?.trim()
+                    if (word.isNullOrBlank()) continue
+                    val freq = parts.getOrNull(1)?.removePrefix("f=")?.trim()?.toIntOrNull() ?: 1
+                    batch.add(DictionaryWordEntity(word, freq, "imported"))
+                    if (batch.size >= 2000) {
+                        dao.insertAll(batch.toList())
+                        totalInserted += batch.size
+                        batch.clear()
+                    }
+                }
+            }
+            if (batch.isNotEmpty()) {
+                dao.insertAll(batch)
+                totalInserted += batch.size
+            }
+            val finalCount = dao.count()
+            TheLogKeeper.getInstance(context).log("INFO", "DictionaryEngine", "DB_MIGRATION_COMPLETE | rows_inserted=[$totalInserted] | final_table_count=[$finalCount]")
+        }
+    }
+}

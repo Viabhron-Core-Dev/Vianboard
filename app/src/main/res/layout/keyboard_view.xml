@@ -1,0 +1,366 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:fitsSystemWindows="true"
+    android:background="#EBEDF0">
+
+    <!-- Tool Bar / Suggestion Bar -->
+    <FrameLayout
+        android:id="@+id/toolbar_container"
+        android:layout_width="match_parent"
+        android:layout_height="48dp"
+        android:background="#EBEDF0">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingHorizontal="4dp">
+
+
+            <!-- Chevron -->
+            <ImageButton
+                android:id="@+id/btn_toolbar_chevron"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:background="?android:attr/selectableItemBackgroundBorderless"
+                android:src="@drawable/ic_chevron_right"
+                android:contentDescription="Expand Toolbar" />
+
+            <!-- Suggestions / Expanded Toolbar content -->
+            <HorizontalScrollView
+                android:id="@+id/toolbar_expanded_scroll"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:scrollbars="none"
+                android:visibility="gone"
+                android:fillViewport="true">
+                
+                <LinearLayout
+                    android:id="@+id/toolbar_expanded_content"
+                    android:layout_width="wrap_content"
+                    android:layout_height="match_parent"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical">
+                </LinearLayout>
+            </HorizontalScrollView>
+
+            <LinearLayout
+                android:id="@+id/suggestion_content"
+                android:layout_width="0dp"
+                android:layout_height="match_parent"
+                android:layout_weight="1"
+                android:orientation="horizontal"
+                android:gravity="center"
+                android:visibility="visible">
+                
+                <LinearLayout
+                    android:id="@+id/suggestion_paste"
+                    android:layout_width="wrap_content"
+                    android:layout_height="match_parent"
+                    android:layout_marginVertical="6dp"
+                    android:layout_marginHorizontal="8dp"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:background="@drawable/bg_paste_chip"
+                    android:paddingHorizontal="16dp"
+                    android:clickable="true"
+                    android:focusable="true"
+                    android:visibility="gone">
+                    <ImageView
+                        android:layout_width="16dp"
+                        android:layout_height="16dp"
+                        android:src="@drawable/ic_clipboard"
+                        android:layout_marginEnd="8dp"
+                        android:tint="#333333" />
+                    <TextView
+                        android:id="@+id/tv_suggestion_paste_text"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:maxWidth="250dp"
+                        android:singleLine="true"
+                        android:ellipsize="middle"
+                        android:textColor="#333333"
+                        android:textSize="14sp"
+                        android:textStyle="bold" />
+                    <ImageView
+                        android:id="@+id/btn_suggestion_paste_close"
+                        android:layout_width="24dp"
+                        android:layout_height="24dp"
+                        android:layout_marginStart="8dp"
+                        android:src="@drawable/ic_close"
+                        android:padding="4dp"
+                        android:background="?android:attr/selectableItemBackgroundBorderless"
+                        android:tint="#555555" />
+                </LinearLayout>
+
+                <View
+                    android:id="@+id/suggestion_paste_divider"
+                    android:layout_width="1dp"
+                    android:layout_height="match_parent"
+                    android:layout_marginVertical="8dp"
+                    android:visibility="gone"
+                    android:background="#CCCCCC" />
+
+                <TextView
+                     android:id="@+id/suggestion_1"
+                     android:layout_width="0dp"
+                     android:layout_height="match_parent"
+                     android:layout_weight="1"
+                     android:gravity="center"
+                     android:text=""
+                     android:textColor="#333333"
+                     android:padding="8dp"
+                     android:textSize="14sp"
+                     android:singleLine="true"
+                     android:ellipsize="middle"
+                     android:visibility="gone"
+                     android:background="?android:attr/selectableItemBackground"
+                     android:clickable="true" />
+                     
+                <View
+                     android:id="@+id/suggestion_divider_1"
+                     android:layout_width="1dp"
+                     android:layout_height="match_parent"
+                     android:layout_marginVertical="8dp"
+                     android:visibility="gone"
+                     android:background="#CCCCCC" />
+                     
+                <TextView
+                     android:id="@+id/suggestion_2"
+                     android:layout_width="0dp"
+                     android:layout_height="match_parent"
+                     android:layout_weight="1"
+                     android:gravity="center"
+                     android:text=""
+                     android:textColor="#333333"
+                     android:padding="8dp"
+                     android:textSize="14sp"
+                     android:singleLine="true"
+                     android:ellipsize="middle"
+                     android:visibility="gone"
+                     android:background="?android:attr/selectableItemBackground"
+                     android:clickable="true" />
+                     
+                <View
+                     android:id="@+id/suggestion_divider_2"
+                     android:layout_width="1dp"
+                     android:layout_height="match_parent"
+                     android:layout_marginVertical="8dp"
+                     android:visibility="gone"
+                     android:background="#CCCCCC" />
+                     
+                <TextView
+                     android:id="@+id/suggestion_3"
+                     android:layout_width="0dp"
+                     android:layout_height="match_parent"
+                     android:layout_weight="1"
+                     android:gravity="center"
+                     android:text=""
+                     android:textColor="#333333"
+                     android:padding="8dp"
+                     android:textSize="14sp"
+                     android:singleLine="true"
+                     android:ellipsize="middle"
+                     android:visibility="gone"
+                     android:background="?android:attr/selectableItemBackground"
+                     android:clickable="true" />
+            </LinearLayout>
+
+            <!-- Pinned Keys -->
+            <LinearLayout
+                android:id="@+id/toolbar_pinned"
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+                
+                <ImageButton
+                    android:id="@+id/btn_clipboard_clear_pinned"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:src="@drawable/ic_clear_clipboard"
+                    android:padding="6dp"
+                    android:scaleType="centerInside"
+                    android:visibility="gone"
+                    android:contentDescription="Clear Clipboard" />
+                
+                <ImageButton
+                    android:id="@+id/btn_toolbar_enter"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:src="@drawable/ic_enter"
+                    android:padding="6dp"
+                    android:scaleType="centerInside"
+                    android:contentDescription="Next Line" />
+                
+                <ImageButton
+                    android:id="@+id/btn_toolbar_paste"
+                    android:layout_width="36dp"
+                    android:layout_height="36dp"
+                    android:background="?android:attr/selectableItemBackgroundBorderless"
+                    android:src="@drawable/ic_clipboard"
+                    android:padding="6dp"
+                    android:scaleType="centerInside"
+                    android:contentDescription="Paste Menu" />
+            </LinearLayout>
+        </LinearLayout>
+    </FrameLayout>
+
+    <!-- Content Area -->
+    <FrameLayout
+        android:id="@+id/content_area"
+        android:layout_width="match_parent"
+        android:layout_height="260dp"
+        android:layout_below="@id/toolbar_container">
+        
+        <!-- Custom Drawn Keyboard Grid -->
+        <com.example.keyboard.KeyboardView
+            android:id="@+id/keyboard_view"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="#EBEDF0" />
+            
+        <!-- Clipboard History Container -->
+        <RelativeLayout
+            android:id="@+id/clipboard_container"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="#EBEDF0"
+            android:visibility="gone">
+            
+            <!-- Bottom Action Row -->
+            <LinearLayout
+                android:id="@+id/clipboard_bottom_row"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_alignParentBottom="true"
+                android:orientation="horizontal"
+                android:paddingBottom="1dp"
+                android:paddingHorizontal="1dp"
+                android:gravity="bottom">
+                
+                <Button
+                    android:id="@+id/btn_clipboard_abc"
+                    android:layout_width="56dp"
+                    android:layout_height="48dp"
+                    android:layout_margin="3dp"
+                    android:background="@drawable/bg_clipboard_item"
+                    android:text="ABC"
+                    android:textColor="#333333"
+                    android:textSize="14sp"
+                    android:textStyle="bold"
+                    android:elevation="1dp"
+                    android:stateListAnimator="@null" />
+                    
+                <ImageButton
+                    android:id="@+id/btn_clipboard_space"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="48dp"
+                    android:layout_margin="3dp"
+                    android:background="@drawable/bg_clipboard_item"
+                    android:elevation="1dp"
+                    android:stateListAnimator="@null"
+                    android:contentDescription="Space" />
+
+                <ImageButton
+                    android:id="@+id/btn_clipboard_backspace"
+                    android:layout_width="56dp"
+                    android:layout_height="48dp"
+                    android:layout_margin="3dp"
+                    android:background="@drawable/bg_clipboard_item"
+                    android:src="@drawable/ic_backspace"
+                    android:scaleType="centerInside"
+                    android:padding="14dp"
+                    android:elevation="1dp" />
+                    
+                <ImageButton
+                    android:id="@+id/btn_clipboard_enter"
+                    android:layout_width="56dp"
+                    android:layout_height="48dp"
+                    android:layout_margin="3dp"
+                    android:background="@drawable/bg_clipboard_item"
+                    android:src="@drawable/ic_enter"
+                    android:scaleType="centerInside"
+                    android:padding="14dp"
+                    android:elevation="1dp" />
+            </LinearLayout>
+
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/clipboard_recycler"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:layout_above="@id/clipboard_bottom_row"
+                android:padding="4dp"
+                android:clipToPadding="false" />
+
+        </RelativeLayout>
+
+        <!-- Emoji Container -->
+        <LinearLayout
+            android:id="@+id/emoji_container"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:background="#EBEDF0"
+            android:visibility="gone">
+            
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/emoji_recycler"
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1"
+                android:padding="4dp"
+                android:clipToPadding="false" />
+                
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="48dp"
+                android:orientation="horizontal"
+                android:background="#FFFFFF"
+                android:gravity="center_vertical"
+                android:elevation="4dp">
+                
+                <!-- ABC Button inside Emoji Keyboard bottom bar -->
+                <Button
+                    android:id="@+id/btn_emoji_abc"
+                    android:layout_width="48dp"
+                    android:layout_height="match_parent"
+                    android:background="?android:attr/selectableItemBackground"
+                    android:text="ABC"
+                    android:textColor="#333333"
+                    android:textStyle="bold"
+                    android:contentDescription="Alphabet" />
+                    
+                <HorizontalScrollView
+                    android:layout_width="0dp"
+                    android:layout_height="match_parent"
+                    android:layout_weight="1"
+                    android:scrollbars="none">
+                    <LinearLayout
+                        android:id="@+id/emoji_category_container"
+                        android:layout_width="wrap_content"
+                        android:layout_height="match_parent"
+                        android:orientation="horizontal" />
+                </HorizontalScrollView>
+                
+                <ImageButton
+                    android:id="@+id/btn_emoji_backspace"
+                    android:layout_width="48dp"
+                    android:layout_height="match_parent"
+                    android:background="?android:attr/selectableItemBackground"
+                    android:src="@drawable/ic_backspace"
+                    android:contentDescription="Backspace" />
+            </LinearLayout>
+        </LinearLayout>
+    </FrameLayout>
+</LinearLayout>
