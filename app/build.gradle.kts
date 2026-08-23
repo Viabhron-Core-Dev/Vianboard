@@ -1,4 +1,4 @@
-import java.net.URL
+import java.net.URI
 
 plugins {
   alias(libs.plugins.android.application)
@@ -116,13 +116,13 @@ tasks.register("downloadDictionaries") {
 
     val google10k = file("src/main/res/raw/google_10k_english.txt")
     if (!google10k.exists()) {
-      val url = URL("https://raw.githubusercontent.com/first20hours/google-10000-english/master/google-10000-english.txt")
+      val url = URI("https://raw.githubusercontent.com/first20hours/google-10000-english/master/google-10000-english.txt").toURL()
       google10k.writeText(url.readText())
     }
 
     val hermitDave50k = file("src/main/res/raw/hermit_dave_en_50k.txt")
     if (!hermitDave50k.exists()) {
-      val url = URL("https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/en/en_50k.txt")
+      val url = URI("https://raw.githubusercontent.com/hermitdave/FrequencyWords/master/content/2018/en/en_50k.txt").toURL()
       hermitDave50k.writeText(url.readText())
     }
   }
