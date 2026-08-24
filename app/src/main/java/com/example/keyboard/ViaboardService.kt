@@ -26,16 +26,47 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
     private var desktopKeyboardView: DesktopKeyboardView? = null
     
     private fun switchToDesktopView() {
+        val keyboardView = mainView?.findViewById<KeyboardView>(R.id.keyboard_view)
+        val desktopContainer = mainView?.findViewById<android.widget.FrameLayout>(R.id.desktop_container)
+        val clipboardContainer = mainView?.findViewById<android.view.View>(R.id.clipboard_container)
+        val promptContainer = mainView?.findViewById<android.view.View>(R.id.prompt_container)
+        val emojiContainer = mainView?.findViewById<android.view.View>(R.id.emoji_container)
+
+        clipboardContainer?.visibility = android.view.View.GONE
+        promptContainer?.visibility = android.view.View.GONE
+        emojiContainer?.visibility = android.view.View.GONE
+        isClipboardModalOpen = false
+        isPromptModalOpen = false
+        isEmojiModalOpen = false
+
         if (desktopKeyboardView == null) {
             desktopKeyboardView = DesktopKeyboardView(this)
             desktopKeyboardView?.listener = this
         }
-        setInputView(desktopKeyboardView)
+        desktopKeyboardView?.reloadKeys()
+
+        if (desktopContainer != null) {
+            desktopContainer.removeAllViews()
+            desktopContainer.addView(desktopKeyboardView)
+            keyboardView?.visibility = android.view.View.GONE
+            desktopContainer.visibility = android.view.View.VISIBLE
+        } else {
+            setInputView(desktopKeyboardView)
+        }
+        TheLogKeeper.getInstance(this).log("INFO", "ViaboardService", "Switched to Desktop Shortcuts View")
     }
 
     override fun onDesktopKey(code: String) {
+        TheLogKeeper.getInstance(this).log("INFO", "DesktopShortcuts", "DESKTOP_KEY_PRESSED | code=$code")
         if (code == "MODE_ALPHABET") {
-            setInputView(mainView)
+            val keyboardView = mainView?.findViewById<KeyboardView>(R.id.keyboard_view)
+            val desktopContainer = mainView?.findViewById<android.widget.FrameLayout>(R.id.desktop_container)
+            if (desktopContainer != null && keyboardView != null) {
+                desktopContainer.visibility = android.view.View.GONE
+                keyboardView.visibility = android.view.View.VISIBLE
+            } else {
+                setInputView(mainView)
+            }
             switchKeyboardLayout(R.xml.kbd_qwerty)
         } else {
             onKeyPress(code)
@@ -50,6 +81,13 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
     private var isToolbarExpanded = false
     private var isAutocorrectEnabled = true
     private var isManualIncognito = false
+    private val tempIncognitoHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val tempIncognitoRunnable = Runnable {
+        isManualIncognito = false
+        updateIncognitoStateUI()
+        updateSuggestions()
+        android.widget.Toast.makeText(this@ViaboardService, "Incognito mode ended (20s)", android.widget.Toast.LENGTH_SHORT).show()
+    }
     
     enum class ShiftState {
         LOWERCASE, UPPERCASE, CAPS_LOCK
@@ -91,6 +129,10 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
     private lateinit var clipboardRepository: ClipboardRepository
     private var clipboardAdapter: ClipboardAdapter? = null
     
+    // Prompt List feature
+    private var isPromptModalOpen = false
+    private var promptAdapter: PromptAdapter? = null
+
     // Emoji feature
     private var isEmojiModalOpen = false
     private var emojiAdapter: com.example.keyboard.EmojiAdapter? = null
@@ -160,6 +202,7 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
         
         setupToolbar(root)
         setupClipboard(root)
+        setupPromptList(root)
         
         return root
     }
@@ -208,6 +251,107 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
             }
         }
     }
+
+    private fun setupPromptList(root: View) {
+        val recycler = root.findViewById<androidx.recyclerview.widget.RecyclerView>(R.id.prompt_recycler)
+        recycler?.layoutManager = androidx.recyclerview.widget.StaggeredGridLayoutManager(2, androidx.recyclerview.widget.StaggeredGridLayoutManager.VERTICAL)
+
+        promptAdapter = PromptAdapter(
+            onItemClicked = { item ->
+                currentInputConnection?.commitText(item.word, 1)
+                togglePromptModal(false)
+            },
+            onItemLongClicked = { item ->
+                showPromptContextMenu(item)
+            }
+        )
+        recycler?.adapter = promptAdapter
+
+        root.findViewById<android.view.View>(R.id.btn_prompt_abc)?.setOnClickListener {
+            togglePromptModal(false)
+        }
+        root.findViewById<android.view.View>(R.id.btn_prompt_space)?.setOnClickListener {
+            sendDownUpKeyEvents(android.view.KeyEvent.KEYCODE_SPACE)
+        }
+        root.findViewById<android.view.View>(R.id.btn_prompt_enter)?.setOnClickListener {
+            handleEnterAction()
+        }
+        root.findViewById<android.view.View>(R.id.btn_prompt_backspace)?.setOnClickListener {
+            sendDownUpKeyEvents(android.view.KeyEvent.KEYCODE_DEL)
+        }
+
+        coroutineScope.launch {
+            ClipboardDatabase.getDatabase(this@ViaboardService).personalDictionaryDao().getAllPrompts().collect { items ->
+                promptAdapter?.setItems(items)
+            }
+        }
+    }
+
+    private fun showPromptContextMenu(item: PersonalDictionaryItem) {
+        val options = arrayOf("Insert Prompt", "Edit Shortcut", "Delete")
+        val builder = android.app.AlertDialog.Builder(this)
+        builder.setTitle("Prompt")
+        builder.setItems(options) { _, which ->
+            when (which) {
+                0 -> {
+                    currentInputConnection?.commitText(item.word, 1)
+                    togglePromptModal(false)
+                }
+                1 -> {
+                    showEditShortcutDialog(item)
+                }
+                2 -> {
+                    coroutineScope.launch(Dispatchers.IO) {
+                        ClipboardDatabase.getDatabase(this@ViaboardService).personalDictionaryDao().delete(item)
+                    }
+                    android.widget.Toast.makeText(this, "Prompt deleted", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+        val dialog = builder.create()
+        val window = dialog.window
+        if (window != null) {
+            val params = window.attributes
+            params.token = mainView?.windowToken
+            params.type = android.view.WindowManager.LayoutParams.TYPE_APPLICATION_ATTACHED_DIALOG
+            window.attributes = params
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+        }
+        dialog.show()
+    }
+
+    private fun showEditShortcutDialog(item: PersonalDictionaryItem) {
+        val input = android.widget.EditText(this).apply {
+            hint = "e.g. shortcut code"
+            setText(item.shortcut ?: "")
+            setSingleLine()
+            setPadding(40, 30, 40, 30)
+        }
+        val builder = android.app.AlertDialog.Builder(this)
+        builder.setTitle("Set Shortcut")
+        builder.setMessage("Type this shortcut while typing to expand this prompt:")
+        builder.setView(input)
+        builder.setPositiveButton("Save") { _, _ ->
+            val shortcutText = input.text.toString().trim()
+            coroutineScope.launch(Dispatchers.IO) {
+                ClipboardDatabase.getDatabase(this@ViaboardService).personalDictionaryDao().insert(
+                    item.copy(shortcut = if (shortcutText.isEmpty()) null else shortcutText)
+                )
+            }
+            android.widget.Toast.makeText(this, "Shortcut saved", android.widget.Toast.LENGTH_SHORT).show()
+        }
+        builder.setNegativeButton("Cancel", null)
+        val dialog = builder.create()
+        val window = dialog.window
+        if (window != null) {
+            val params = window.attributes
+            params.token = mainView?.windowToken
+            params.type = android.view.WindowManager.LayoutParams.TYPE_APPLICATION_ATTACHED_DIALOG
+            window.attributes = params
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+        }
+        dialog.show()
+    }
     
     private fun showClipboardContextMenu(item: ClipboardItem) {
         val pinAction = if (item.isPinned) "Unpin" else "Pin to Top"
@@ -255,13 +399,18 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
         if (clip != null && clip.itemCount > 0) {
             val text = clip.getItemAt(0).text?.toString()
             if (!text.isNullOrEmpty()) {
+                val isSensitive = (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU && 
+                    clip.description.extras?.getBoolean("android.content.extra.IS_SENSITIVE") == true) || 
+                    isIncognitoActive() || 
+                    isSensitiveField(currentInputEditorInfo)
+                
                 clipboardLastObservedText = text
                 clipboardObservedTime = System.currentTimeMillis()
                 clipboardLastDismissedText = null
                 
                 updateSuggestions()
                 coroutineScope.launch(Dispatchers.IO) {
-                    clipboardRepository.insert(text)
+                    clipboardRepository.insert(text, isSensitive)
                 }
             }
         }
@@ -278,12 +427,24 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
         val emojiContainer = mainView?.findViewById<android.view.View>(R.id.emoji_container) ?: return
         
         if (isEmojiModalOpen) {
+            // Close other modals
+            isClipboardModalOpen = false
+            isPromptModalOpen = false
+            mainView?.findViewById<android.view.View>(R.id.clipboard_container)?.visibility = android.view.View.GONE
+            mainView?.findViewById<android.view.View>(R.id.prompt_container)?.visibility = android.view.View.GONE
+
             // Hide keyboard, show emoji container
             keyboardView.visibility = android.view.View.GONE
+            val desktopContainer = mainView?.findViewById<android.view.View>(R.id.desktop_container)
+            desktopContainer?.visibility = android.view.View.GONE
             emojiContainer.visibility = android.view.View.VISIBLE
+            TheLogKeeper.getInstance(this).log("INFO", "ViaboardService", "EMOJI_MODAL_OPENED")
             
-            // Set up recycler view
+            // Set up recycler view & search
+            val searchInput = mainView?.findViewById<android.widget.EditText>(R.id.et_emoji_search)
+            val searchClear = mainView?.findViewById<android.widget.ImageView>(R.id.btn_emoji_search_clear)
             val recycler = mainView?.findViewById<androidx.recyclerview.widget.RecyclerView>(R.id.emoji_recycler)
+            
             if (recycler?.adapter == null) {
                 recycler?.layoutManager = androidx.recyclerview.widget.GridLayoutManager(this, 7)
                 emojiAdapter = EmojiAdapter(
@@ -291,6 +452,7 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
                     onClick = { emoji ->
                         currentInputConnection?.commitText(emoji, 1)
                         com.example.keyboard.emoji.EmojiDataProvider.addRecent(this, emoji)
+                        TheLogKeeper.getInstance(this).log("INFO", "EmojiModal", "EMOJI_COMMITTED | emoji=$emoji")
                     },
                     onLongClick = { emoji, view ->
                         showSkinTonePopup(emoji, view)
@@ -303,6 +465,29 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
                 }
                 mainView?.findViewById<android.view.View>(R.id.btn_emoji_backspace)?.setOnClickListener {
                     sendDownUpKeyEvents(android.view.KeyEvent.KEYCODE_DEL)
+                    TheLogKeeper.getInstance(this).log("INFO", "EmojiModal", "EMOJI_BACKSPACE_CLICK")
+                }
+
+                searchInput?.addTextChangedListener(object : android.text.TextWatcher {
+                    override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                    override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                        val query = s?.toString()?.trim() ?: ""
+                        if (query.isNotEmpty()) {
+                            searchClear?.visibility = android.view.View.VISIBLE
+                            val filtered = com.example.keyboard.emoji.EmojiDataProvider.searchEmojis(query)
+                            emojiAdapter?.updateData(filtered)
+                            TheLogKeeper.getInstance(this@ViaboardService).log("INFO", "EmojiModal", "EMOJI_SEARCH | query=$query | count=${filtered.size}")
+                        } else {
+                            searchClear?.visibility = android.view.View.GONE
+                            emojiAdapter?.updateData(com.example.keyboard.emoji.EmojiDataProvider.SMILEYS)
+                        }
+                    }
+                    override fun afterTextChanged(s: android.text.Editable?) {}
+                })
+
+                searchClear?.setOnClickListener {
+                    searchInput?.text?.clear()
+                    searchClear.visibility = android.view.View.GONE
                 }
                 
                 setupEmojiCategories()
@@ -396,6 +581,11 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
         val btnClearPinned = mainView?.findViewById<android.view.View>(R.id.btn_clipboard_clear_pinned)
         
         if (isClipboardModalOpen) {
+            isEmojiModalOpen = false
+            isPromptModalOpen = false
+            mainView?.findViewById<android.view.View>(R.id.emoji_container)?.visibility = View.GONE
+            mainView?.findViewById<android.view.View>(R.id.prompt_container)?.visibility = View.GONE
+
             coroutineScope.launch(Dispatchers.IO) {
                 clipboardRepository.cleanup()
             }
@@ -406,6 +596,29 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
             clipboardContainer.visibility = View.GONE
             keyboardView.visibility = View.VISIBLE
             btnClearPinned?.visibility = View.GONE
+        }
+    }
+
+    private fun togglePromptModal(open: Boolean? = null) {
+        if (open != null) {
+            isPromptModalOpen = open
+        } else {
+            isPromptModalOpen = !isPromptModalOpen
+        }
+        val keyboardView = mainView?.findViewById<KeyboardView>(R.id.keyboard_view) ?: return
+        val promptContainer = mainView?.findViewById<android.view.View>(R.id.prompt_container) ?: return
+        
+        if (isPromptModalOpen) {
+            isClipboardModalOpen = false
+            isEmojiModalOpen = false
+            mainView?.findViewById<android.view.View>(R.id.clipboard_container)?.visibility = View.GONE
+            mainView?.findViewById<android.view.View>(R.id.emoji_container)?.visibility = View.GONE
+
+            keyboardView.visibility = View.GONE
+            promptContainer.visibility = View.VISIBLE
+        } else {
+            promptContainer.visibility = View.GONE
+            keyboardView.visibility = View.VISIBLE
         }
     }
 
@@ -494,10 +707,16 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
             if (isToolbarExpanded) {
                 btnChevron.setImageResource(R.drawable.ic_chevron_left)
                 suggestionContent.visibility = View.GONE
+                pinnedContent.visibility = View.GONE
                 expandedScroll.visibility = View.VISIBLE
             } else {
-                btnChevron.setImageResource(R.drawable.ic_chevron_right)
+                if (isIncognitoActive()) {
+                    btnChevron.setImageResource(R.drawable.ic_incognito_on)
+                } else {
+                    btnChevron.setImageResource(R.drawable.ic_chevron_right)
+                }
                 suggestionContent.visibility = View.VISIBLE
+                pinnedContent.visibility = View.VISIBLE
                 expandedScroll.visibility = View.GONE
             }
         }
@@ -541,8 +760,10 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
             // Register specific references
             if (actionId == "INCOGNITO") {
                 btnIncognito = btn
-                if (isManualIncognito || (currentInputEditorInfo?.imeOptions?.and(android.view.inputmethod.EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING) != 0)) {
+                if (isIncognitoActive()) {
                     btn.setImageResource(R.drawable.ic_incognito_on)
+                } else {
+                    btn.setImageResource(R.drawable.ic_incognito_off)
                 }
             }
             
@@ -556,6 +777,19 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
                     }
                     "PASTE" -> {
                         handleToolbarAction("CLIPBOARD")
+                        true
+                    }
+                    "INCOGNITO" -> {
+                        tempIncognitoHandler.removeCallbacks(tempIncognitoRunnable)
+                        isManualIncognito = true
+                        updateIncognitoStateUI()
+                        currentWord.clear()
+                        wordLengthBeforeCursor = 0
+                        wordLengthAfterCursor = 0
+                        previousWord = null
+                        clearSuggestions()
+                        android.widget.Toast.makeText(this@ViaboardService, "Incognito active for 20 seconds", android.widget.Toast.LENGTH_SHORT).show()
+                        tempIncognitoHandler.postDelayed(tempIncognitoRunnable, 20000)
                         true
                     }
                     else -> false
@@ -584,6 +818,7 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
             "SELECT_ALL" -> sendSelectAll()
             "PASTE" -> currentInputConnection?.performContextMenuAction(android.R.id.paste)
             "CLIPBOARD" -> toggleClipboardModal()
+            "PROMPT_LIST" -> togglePromptModal()
             "ENTER" -> sendDownUpKeyEvents(android.view.KeyEvent.KEYCODE_ENTER)
             "COPY" -> currentInputConnection?.performContextMenuAction(android.R.id.copy)
             "CUT" -> currentInputConnection?.performContextMenuAction(android.R.id.cut)
@@ -635,13 +870,18 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
                 android.widget.Toast.makeText(this, "Emoji coming soon", android.widget.Toast.LENGTH_SHORT).show()
             }
             "INCOGNITO" -> {
+                tempIncognitoHandler.removeCallbacks(tempIncognitoRunnable)
                 isManualIncognito = !isManualIncognito
                 updateIncognitoStateUI()
                 currentWord.clear()
                 wordLengthBeforeCursor = 0
                 wordLengthAfterCursor = 0
                 previousWord = null
-                clearSuggestions()
+                if (isIncognitoActive()) {
+                    clearSuggestions()
+                } else {
+                    updateSuggestions()
+                }
                 val stateText = if (isIncognitoActive()) "Incognito Mode ON" else "Incognito Mode OFF"
                 android.widget.Toast.makeText(this, stateText, android.widget.Toast.LENGTH_SHORT).show()
             }
@@ -670,13 +910,24 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
         if (word.isBlank()) return
         
         val context = mainView?.context ?: return
+        val options = arrayOf("Remove from dictionary", "Add to Prompt List / Shortcuts")
         val builder = android.app.AlertDialog.Builder(context)
-        builder.setTitle("Remove Suggestion")
-        builder.setMessage("Do you want to stop suggesting '$word'?")
-        builder.setPositiveButton("Remove") { _, _ ->
-            coroutineScope.launch {
-                // forgotten word
-                updateSuggestions()
+        builder.setTitle("Suggestion: $word")
+        builder.setItems(options) { _, which ->
+            when (which) {
+                0 -> {
+                    coroutineScope.launch {
+                        if (::dictionaryFacilitator.isInitialized) {
+                            dictionaryFacilitator.removeWord(word)
+                        }
+                        updateSuggestions()
+                    }
+                    android.widget.Toast.makeText(this@ViaboardService, "'$word' removed from dictionary", android.widget.Toast.LENGTH_SHORT).show()
+                }
+                1 -> {
+                    val promptItem = PersonalDictionaryItem(word = word, frequency = 250)
+                    showEditShortcutDialog(promptItem)
+                }
             }
         }
         builder.setNegativeButton("Cancel", null)
@@ -727,16 +978,34 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
         }
 
         val clipboardContainer = mainView?.findViewById<android.view.View>(R.id.clipboard_container)
+        val promptContainer = mainView?.findViewById<android.view.View>(R.id.prompt_container)
         val emojiContainer = mainView?.findViewById<android.view.View>(R.id.emoji_container)
         val keyboardView = mainView?.findViewById<com.example.keyboard.KeyboardView>(R.id.keyboard_view)
         clipboardContainer?.visibility = android.view.View.GONE
+        promptContainer?.visibility = android.view.View.GONE
         emojiContainer?.visibility = android.view.View.GONE
         keyboardView?.visibility = android.view.View.VISIBLE
         isClipboardModalOpen = false
+        isPromptModalOpen = false
         isEmojiModalOpen = false
 
         // Select initial layout based on input type
         val inputType = info?.inputType ?: android.text.InputType.TYPE_CLASS_TEXT
+        val variation = inputType and android.text.InputType.TYPE_MASK_VARIATION
+        val isUri = (info != null) && (
+            variation == android.text.InputType.TYPE_TEXT_VARIATION_URI ||
+            variation == android.text.InputType.TYPE_TEXT_VARIATION_WEB_EDIT_TEXT
+        )
+        val isEmail = (info != null) && (
+            variation == android.text.InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS ||
+            variation == android.text.InputType.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS
+        )
+        val imeAction = (info?.imeOptions ?: 0) and EditorInfo.IME_MASK_ACTION
+
+        keyboardView?.isUriField = isUri
+        keyboardView?.isEmailField = isEmail
+        keyboardView?.enterAction = imeAction
+
         when (inputType and android.text.InputType.TYPE_MASK_CLASS) {
             android.text.InputType.TYPE_CLASS_NUMBER,
             android.text.InputType.TYPE_CLASS_DATETIME,
@@ -873,67 +1142,19 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
     private fun updateIncognitoStateUI() {
         val active = isIncognitoActive()
         
-        // Update the toggle button icon
-        if (active) {
-            btnIncognito?.setImageResource(R.drawable.ic_incognito_on)
-            // Change toolbar background to deep private dark color
-            toolbarContainer?.setBackgroundColor(android.graphics.Color.parseColor("#202124"))
-            
-            // Set suggestions text color to white for contrast
-            tvSuggestion1?.setTextColor(android.graphics.Color.WHITE)
-            tvSuggestion2?.setTextColor(android.graphics.Color.WHITE)
-            tvSuggestion3?.setTextColor(android.graphics.Color.WHITE)
-            mainView?.findViewById<android.view.ViewGroup>(R.id.suggestion_paste)?.let { 
-                (it.getChildAt(1) as? android.widget.TextView)?.setTextColor(android.graphics.Color.WHITE)
-                (it.getChildAt(0) as? android.widget.ImageView)?.setColorFilter(android.graphics.Color.WHITE)
-            }
-            
-            // Set button icons to white tint
-            val whiteColor = android.graphics.Color.WHITE
-            mainView?.let { root ->
-                root.findViewById<android.widget.ImageButton>(R.id.btn_toolbar_chevron)?.setColorFilter(whiteColor)
-                
-                val expandedContent = root.findViewById<android.widget.LinearLayout>(R.id.toolbar_expanded_content)
-                val pinnedContent = root.findViewById<android.widget.LinearLayout>(R.id.toolbar_pinned)
-                
-                for (i in 0 until (expandedContent?.childCount ?: 0)) {
-                    (expandedContent?.getChildAt(i) as? android.widget.ImageButton)?.setColorFilter(whiteColor)
-                }
-                for (i in 0 until (pinnedContent?.childCount ?: 0)) {
-                    (pinnedContent?.getChildAt(i) as? android.widget.ImageButton)?.setColorFilter(whiteColor)
-                }
-            }
-            btnIncognito?.setColorFilter(whiteColor)
+        // Update the toggle button icon in toolbar
+        btnIncognito?.setImageResource(if (active) R.drawable.ic_incognito_on else R.drawable.ic_incognito_off)
+        
+        // Update chevron icon to incognito icon when active and collapsed (HeliBoard style)
+        val btnChevron = mainView?.findViewById<android.widget.ImageButton>(R.id.btn_toolbar_chevron)
+        if (isToolbarExpanded) {
+            btnChevron?.setImageResource(R.drawable.ic_chevron_left)
         } else {
-            btnIncognito?.setImageResource(R.drawable.ic_incognito_off)
-            // Reset toolbar background to standard light gray
-            toolbarContainer?.setBackgroundColor(android.graphics.Color.parseColor("#E8EAED"))
-            
-            // Reset suggestions text color to dark gray
-            val darkGray = android.graphics.Color.parseColor("#333333")
-            tvSuggestion1?.setTextColor(darkGray)
-            tvSuggestion2?.setTextColor(darkGray)
-            tvSuggestion3?.setTextColor(darkGray)
-            mainView?.findViewById<android.view.ViewGroup>(R.id.suggestion_paste)?.let { 
-                (it.getChildAt(1) as? android.widget.TextView)?.setTextColor(darkGray)
-                (it.getChildAt(0) as? android.widget.ImageView)?.setColorFilter(darkGray)
+            if (active) {
+                btnChevron?.setImageResource(R.drawable.ic_incognito_on)
+            } else {
+                btnChevron?.setImageResource(R.drawable.ic_chevron_right)
             }
-            
-            // Reset button icons to dark gray tint
-            mainView?.let { root ->
-                root.findViewById<android.widget.ImageButton>(R.id.btn_toolbar_chevron)?.setColorFilter(darkGray)
-                
-                val expandedContent = root.findViewById<android.widget.LinearLayout>(R.id.toolbar_expanded_content)
-                val pinnedContent = root.findViewById<android.widget.LinearLayout>(R.id.toolbar_pinned)
-                
-                for (i in 0 until (expandedContent?.childCount ?: 0)) {
-                    (expandedContent?.getChildAt(i) as? android.widget.ImageButton)?.setColorFilter(darkGray)
-                }
-                for (i in 0 until (pinnedContent?.childCount ?: 0)) {
-                    (pinnedContent?.getChildAt(i) as? android.widget.ImageButton)?.setColorFilter(darkGray)
-                }
-            }
-            btnIncognito?.setColorFilter(darkGray)
         }
     }
 
@@ -958,6 +1179,7 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
     }
 
     override fun onDestroy() {
+        tempIncognitoHandler.removeCallbacks(tempIncognitoRunnable)
         super.onDestroy()
         clipboardManager?.removePrimaryClipChangedListener(clipboardListener)
         coroutineScope.launch {
@@ -1025,9 +1247,25 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
                     clipboardLastObservedText = text
                     clipboardObservedTime = System.currentTimeMillis()
                 }
-                if (System.currentTimeMillis() - clipboardObservedTime < 300_000L) {
+                val age = System.currentTimeMillis() - clipboardObservedTime
+                val isSensitive = (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU && 
+                    clip.description.extras?.getBoolean("android.content.extra.IS_SENSITIVE") == true) || isIncognitoActive()
+                val maxAge = if (isSensitive) 60_000L else 300_000L
+
+                if (age < maxAge) {
                     showPaste = true
-                    tvSuggestionPasteText?.text = text.replace("\n", " ")
+                    val trimmed = text.trim()
+                    val isOtp = trimmed.matches(Regex("^\\d{4,8}$")) || 
+                                trimmed.contains(Regex("(?i)\\b(code|otp|passcode)\\s*[:=-]?\\s*\\d{4,8}\\b"))
+                    val isUrl = trimmed.startsWith("http://") || trimmed.startsWith("https://") || 
+                                trimmed.matches(Regex("(?i)^[a-z0-9-]+(\\.[a-z]{2,})+(/.*)?$"))
+
+                    val displayText = when {
+                        isOtp -> "🔢 OTP: $trimmed"
+                        isUrl -> "🔗 $trimmed"
+                        else -> trimmed.replace("\n", " ")
+                    }
+                    tvSuggestionPasteText?.text = displayText
                 }
             }
         }
@@ -1049,6 +1287,11 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
             currentSuggestions = suggestionsList.map { it.word }
             isCurrentSuggestionsFuzzy = suggestedWords.hasAutoCorrectionCandidate
 
+            val isIncognito = isIncognitoActive()
+            val textColorPrimary = if (isIncognito) android.graphics.Color.WHITE else android.graphics.Color.parseColor("#111111")
+            val textColorSecondary = if (isIncognito) android.graphics.Color.parseColor("#AAAAAA") else android.graphics.Color.parseColor("#666666")
+            val textColorCandidate = if (isIncognito) android.graphics.Color.parseColor("#80D8FF") else android.graphics.Color.parseColor("#000000")
+
             if (prefix.isBlank()) {
                 tvSuggestion1?.visibility = View.GONE
                 suggestionDivider1?.visibility = View.GONE
@@ -1058,11 +1301,11 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
                 if (suggestionsList.isNotEmpty()) {
                     tvSuggestion2?.text = suggestionsList.getOrNull(0)?.word ?: ""
                     tvSuggestion2?.visibility = View.VISIBLE
-                    tvSuggestion2?.setTextColor(android.graphics.Color.WHITE)
+                    tvSuggestion2?.setTextColor(textColorPrimary)
                     
                     tvSuggestion3?.text = suggestionsList.getOrNull(1)?.word ?: ""
                     tvSuggestion3?.visibility = if (suggestionsList.size > 1) View.VISIBLE else View.GONE
-                    tvSuggestion3?.setTextColor(android.graphics.Color.WHITE)
+                    tvSuggestion3?.setTextColor(textColorPrimary)
                 } else {
                     tvSuggestion2?.visibility = View.GONE
                     tvSuggestion3?.visibility = View.GONE
@@ -1070,7 +1313,7 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
             } else {
                 tvSuggestion1?.text = prefix
                 tvSuggestion1?.visibility = View.VISIBLE
-                tvSuggestion1?.setTextColor(android.graphics.Color.parseColor("#AAAAAA"))
+                tvSuggestion1?.setTextColor(textColorSecondary)
                 
                 val bestCandidate = suggestionsList.firstOrNull()?.word ?: prefix
                 val secondCandidate = suggestionsList.drop(1).firstOrNull { it.word.lowercase() != bestCandidate.lowercase() }?.word
@@ -1080,16 +1323,16 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
                 
                 if (suggestedWords.hasAutoCorrectionCandidate) {
                     tvSuggestion2?.setTypeface(null, android.graphics.Typeface.BOLD)
-                    tvSuggestion2?.setTextColor(android.graphics.Color.parseColor("#80D8FF"))
+                    tvSuggestion2?.setTextColor(textColorCandidate)
                 } else {
                     tvSuggestion2?.setTypeface(null, android.graphics.Typeface.NORMAL)
-                    tvSuggestion2?.setTextColor(android.graphics.Color.WHITE)
+                    tvSuggestion2?.setTextColor(textColorPrimary)
                 }
                 
                 if (secondCandidate != null) {
                     tvSuggestion3?.text = secondCandidate
                     tvSuggestion3?.visibility = View.VISIBLE
-                    tvSuggestion3?.setTextColor(android.graphics.Color.WHITE)
+                    tvSuggestion3?.setTextColor(textColorPrimary)
                 } else {
                     tvSuggestion3?.visibility = View.GONE
                 }
@@ -1302,7 +1545,8 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
                 startActivity(intent)
             }
             "ONE_HAND" -> { /* TODO */ }
-            "CLIPBOARD" -> { /* TODO */ }
+            "CLIPBOARD" -> toggleClipboardModal()
+            "PROMPT_LIST" -> togglePromptModal()
             "SELECT_ALL" -> sendSelectAll()
             "COPY" -> inputConnection.performContextMenuAction(android.R.id.copy)
             "PASTE" -> inputConnection.performContextMenuAction(android.R.id.paste)
@@ -1371,13 +1615,16 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
                     finalKey = if (shiftState == ShiftState.LOWERCASE) key.lowercase() else key.uppercase()
                 }
                 
-                inputConnection.commitText(finalKey, 1)
+                val handledSmart = applySmartTypingRules(finalKey, inputConnection)
+                if (!handledSmart) {
+                    inputConnection.commitText(finalKey, 1)
+                }
                 
                 if (shiftState == ShiftState.UPPERCASE && finalKey.length == 1 && finalKey[0].isLetter()) {
                     updateShiftState(ShiftState.LOWERCASE)
                 }
                 
-                if (finalKey.length == 1 && finalKey[0].isLetter()) {
+                if (!handledSmart && finalKey.length == 1 && finalKey[0].isLetter()) {
                     val insertIndex = wordLengthBeforeCursor.coerceIn(0, currentWord.length)
                     currentWord.insert(insertIndex, finalKey)
                     wordLengthBeforeCursor = insertIndex + finalKey.length
@@ -1390,6 +1637,99 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
                 }
             }
         }
+    }
+
+    private fun applySmartTypingRules(key: String, ic: android.view.inputmethod.InputConnection): Boolean {
+        if (key.isEmpty()) return false
+
+        // 1. Punctuation Space Snapping (e.g. "word ." -> "word. ")
+        if (key in listOf(".", ",", "!", "?", ":", ";")) {
+            val before = ic.getTextBeforeCursor(2, 0)?.toString() ?: ""
+            if (before.endsWith(" ") && before.length > 1 && !before[before.length - 2].isWhitespace()) {
+                ic.deleteSurroundingText(1, 0)
+                ic.commitText(key + " ", 1)
+                return true
+            }
+        }
+
+        // 2. Smart Multiply:
+        // Case A: User types '*' after a digit -> '×'
+        if (key == "*") {
+            val before = ic.getTextBeforeCursor(1, 0)?.toString() ?: ""
+            if (before.isNotEmpty() && before.last().isDigit()) {
+                ic.commitText("×", 1)
+                return true
+            }
+        }
+        // Case B: User types a digit following '\d[xX]' (e.g. '5x' + '5' -> '5×5')
+        if (key.length == 1 && key[0].isDigit()) {
+            val before2 = ic.getTextBeforeCursor(2, 0)?.toString() ?: ""
+            if (before2.length == 2 && before2[0].isDigit() && (before2[1] == 'x' || before2[1] == 'X')) {
+                ic.deleteSurroundingText(1, 0)
+                ic.commitText("×$key", 1)
+                return true
+            }
+        }
+
+        // 3. Smart Fractions: typing denominator digit after '1/', '2/', '3/', '5/', '7/'
+        if (key.length == 1 && key[0].isDigit()) {
+            val before2 = ic.getTextBeforeCursor(2, 0)?.toString() ?: ""
+            val fraction = when {
+                before2 == "1/" && key == "2" -> "½"
+                before2 == "1/" && key == "4" -> "¼"
+                before2 == "3/" && key == "4" -> "¾"
+                before2 == "1/" && key == "3" -> "⅓"
+                before2 == "2/" && key == "3" -> "⅔"
+                before2 == "1/" && key == "8" -> "⅛"
+                before2 == "3/" && key == "8" -> "⅜"
+                before2 == "5/" && key == "8" -> "⅝"
+                before2 == "7/" && key == "8" -> "⅞"
+                else -> null
+            }
+            if (fraction != null) {
+                ic.deleteSurroundingText(2, 0)
+                ic.commitText(fraction, 1)
+                return true
+            }
+        }
+
+        // 4. Smart Dashes:
+        // Case A: Double hyphen '--' -> em-dash '—'
+        if (key == "-") {
+            val before1 = ic.getTextBeforeCursor(1, 0)?.toString() ?: ""
+            if (before1 == "-") {
+                ic.deleteSurroundingText(1, 0)
+                ic.commitText("—", 1)
+                return true
+            }
+        }
+        // Case B: Number range en-dash (e.g. '2020-' + '2' -> '2020–2')
+        if (key.length == 1 && key[0].isDigit()) {
+            val before2 = ic.getTextBeforeCursor(2, 0)?.toString() ?: ""
+            if (before2.length == 2 && before2[0].isDigit() && before2[1] == '-') {
+                ic.deleteSurroundingText(1, 0)
+                ic.commitText("–$key", 1)
+                return true
+            }
+        }
+
+        // 5. Smart Typographic Quotes:
+        if (key == "\"" || key == "“" || key == "”") {
+            val before1 = ic.getTextBeforeCursor(1, 0)?.toString() ?: ""
+            val isOpening = before1.isEmpty() || before1.last().isWhitespace() || before1.last() in "([{<\"'\n\r\t"
+            val quote = if (isOpening) "“" else "”"
+            ic.commitText(quote, 1)
+            return true
+        }
+        if (key == "'" || key == "‘" || key == "’") {
+            val before1 = ic.getTextBeforeCursor(1, 0)?.toString() ?: ""
+            val isOpening = before1.isEmpty() || before1.last().isWhitespace() || before1.last() in "([{<\"'\n\r\t"
+            val quote = if (isOpening) "‘" else "’"
+            ic.commitText(quote, 1)
+            return true
+        }
+
+        return false
     }
 
     override fun onLongPressKey(key: String, keyRect: android.graphics.RectF, keyboardView: View) {

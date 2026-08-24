@@ -11,11 +11,17 @@ interface ClipboardDao {
     @Query("SELECT * FROM clipboard_history ORDER BY isPinned DESC, timestamp DESC")
     fun getAllItems(): List<ClipboardItem>
 
+    @Query("SELECT * FROM clipboard_history ORDER BY isPinned DESC, timestamp DESC")
+    fun getAllSync(): List<ClipboardItem>
+
     @Query("SELECT * FROM clipboard_history WHERE text = :text LIMIT 1")
     fun getItemByText(text: String): ClipboardItem?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     fun insert(item: ClipboardItem): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    fun insertSync(item: ClipboardItem): Long
 
     @Update
     fun update(item: ClipboardItem)
@@ -28,6 +34,9 @@ interface ClipboardDao {
 
     @Query("DELETE FROM clipboard_history WHERE isPinned = 0 AND timestamp < :timestamp")
     fun deleteOldUnpinned(timestamp: Long)
+
+    @Query("DELETE FROM clipboard_history WHERE isSensitive = 1 AND timestamp < :sensitiveCutoff")
+    fun deleteSensitiveOlderThan(sensitiveCutoff: Long)
 
     @Query("SELECT COUNT(*) FROM clipboard_history WHERE isPinned = 0")
     fun getUnpinnedCount(): Int

@@ -6,13 +6,13 @@ class ClipboardRepository(private val clipboardDao: ClipboardDao) {
 
     val allItems: Flow<List<ClipboardItem>> = clipboardDao.getAllItemsFlow()
 
-    fun insert(text: String) {
+    fun insert(text: String, isSensitive: Boolean = false) {
         val existing = clipboardDao.getItemByText(text)
         if (existing != null) {
             // Update timestamp to bubble it to the top
-            clipboardDao.insert(existing.copy(timestamp = System.currentTimeMillis()))
+            clipboardDao.insert(existing.copy(timestamp = System.currentTimeMillis(), isSensitive = isSensitive))
         } else {
-            clipboardDao.insert(ClipboardItem(text = text))
+            clipboardDao.insert(ClipboardItem(text = text, isSensitive = isSensitive))
             cleanup()
         }
     }
@@ -30,6 +30,10 @@ class ClipboardRepository(private val clipboardDao: ClipboardDao) {
     }
 
     fun cleanup() {
+        // Purge sensitive clipboard items older than 60 seconds
+        val sixtySecondsAgo = System.currentTimeMillis() - 60_000L
+        clipboardDao.deleteSensitiveOlderThan(sixtySecondsAgo)
+
         // Time limit: delete items older than 1 hour
         val oneHourAgo = System.currentTimeMillis() - (60 * 60 * 1000)
         clipboardDao.deleteOldUnpinned(oneHourAgo)

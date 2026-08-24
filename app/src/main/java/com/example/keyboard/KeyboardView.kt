@@ -9,6 +9,7 @@ import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.View
 import com.example.R
+import com.example.keyboard.longpress.LongPressSettingsManager
 
 class KeyboardView @JvmOverloads constructor(
     context: Context, attrs: AttributeSet? = null, defStyleAttr: Int = 0
@@ -110,6 +111,27 @@ class KeyboardView @JvmOverloads constructor(
     }
 
     private var desktopSelectMode = false
+    var isUriField = false
+        set(value) {
+            if (field != value) {
+                field = value
+                invalidate()
+            }
+        }
+    var isEmailField = false
+        set(value) {
+            if (field != value) {
+                field = value
+                invalidate()
+            }
+        }
+    var enterAction = android.view.inputmethod.EditorInfo.IME_ACTION_UNSPECIFIED
+        set(value) {
+            if (field != value) {
+                field = value
+                invalidate()
+            }
+        }
 
     fun setDesktopSelectMode(active: Boolean) {
         desktopSelectMode = active
@@ -223,9 +245,10 @@ class KeyboardView @JvmOverloads constructor(
                 
                 // Draw Key Background
                 val isPressed = isKeyPressed(key)
-                bgPaint.color = if (isPressed && !isAccentPopupVisible) Color.parseColor("#D0D3D8")
+                bgPaint.color = if (isPressed && !isAccentPopupVisible) Color.parseColor("#B0BEC5")
                                 else if (key.codes == "DSK_SEL" && desktopSelectMode) Color.parseColor("#4285F4")
-                                else if (key.isFunctional) Color.parseColor("#DDE1E5") 
+                                else if (key.codes == "ENTER" || key.codes == "DSK_ENTER") Color.parseColor("#78909C")
+                                else if (key.codes == "," || key.codes == "." || key.codes == "DEL" || key.codes == "SHIFT" || key.codes == "MODE_SYMBOLS" || key.codes == "MODE_SYMBOLS_SHIFT" || key.codes == "MODE_ALPHABET" || key.isFunctional) Color.parseColor("#CFD8DC") 
                                 else Color.WHITE
                 
                 canvas.drawRoundRect(rect, cornerRadius, cornerRadius, bgPaint)
@@ -234,13 +257,23 @@ class KeyboardView @JvmOverloads constructor(
                 val drawableRes = when (key.codes) {
                     "SHIFT" -> R.drawable.ic_shift
                     "DEL" -> R.drawable.ic_backspace
-                    "ENTER" -> R.drawable.ic_enter
+                    "ENTER" -> when (enterAction and android.view.inputmethod.EditorInfo.IME_MASK_ACTION) {
+                        android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH -> R.drawable.ic_search
+                        android.view.inputmethod.EditorInfo.IME_ACTION_SEND -> R.drawable.ic_send
+                        android.view.inputmethod.EditorInfo.IME_ACTION_DONE -> R.drawable.ic_check
+                        else -> R.drawable.ic_enter
+                    }
                     else -> null
                 }
                 
                 if (drawableRes != null) {
-                    val drawable = context.getDrawable(drawableRes)
+                    val drawable = context.getDrawable(drawableRes)?.mutate()
                     if (drawable != null) {
+                        if (key.codes == "ENTER") {
+                            drawable.setTint(Color.WHITE)
+                        } else {
+                            drawable.setTint(Color.parseColor("#1C1E21"))
+                        }
                         val iconWidth = drawable.intrinsicWidth * 1.5f
                         val iconHeight = drawable.intrinsicHeight * 1.5f
                         val left = rect.centerX() - iconWidth / 2
@@ -249,24 +282,29 @@ class KeyboardView @JvmOverloads constructor(
                         drawable.draw(canvas)
                     }
                 } else {
+                    val labelToDraw = if (key.codes == ",") {
+                        if (isUriField) "/" else if (isEmailField) "@" else key.label
+                    } else {
+                        key.label
+                    }
                     val originalSize = textPaint.textSize
-                    if (!isDesktopLayout && key.label.length > 1) {
+                    if (!isDesktopLayout && labelToDraw.length > 1) {
                         textPaint.textSize = originalSize * 0.65f
                     }
-                    if (isDesktopLayout && textPaint.measureText(key.label) > rect.width() - 8f && key.label.contains(" ")) {
-                        val spaceIndex = key.label.indexOf(" ")
-                        val line1 = key.label.substring(0, spaceIndex)
-                        val line2 = key.label.substring(spaceIndex + 1)
+                    if (isDesktopLayout && textPaint.measureText(labelToDraw) > rect.width() - 8f && labelToDraw.contains(" ")) {
+                        val spaceIndex = labelToDraw.indexOf(" ")
+                        val line1 = labelToDraw.substring(0, spaceIndex)
+                        val line2 = labelToDraw.substring(spaceIndex + 1)
                         val textHeight = textPaint.descent() - textPaint.ascent()
                         val textY1 = rect.centerY() - textHeight / 2 - ((textPaint.descent() + textPaint.ascent()) / 2)
                         val textY2 = rect.centerY() + textHeight / 2 - ((textPaint.descent() + textPaint.ascent()) / 2)
                         canvas.drawText(line1, rect.centerX(), textY1, textPaint)
                         canvas.drawText(line2, rect.centerX(), textY2, textPaint)
-                    } else if (isDesktopLayout && textPaint.measureText(key.label) > rect.width() - 8f) {
+                    } else if (isDesktopLayout && textPaint.measureText(labelToDraw) > rect.width() - 8f) {
                         // Force split in half if no space
-                        val mid = key.label.length / 2
-                        val line1 = key.label.substring(0, mid)
-                        val line2 = key.label.substring(mid)
+                        val mid = labelToDraw.length / 2
+                        val line1 = labelToDraw.substring(0, mid)
+                        val line2 = labelToDraw.substring(mid)
                         val textHeight = textPaint.descent() - textPaint.ascent()
                         val textY1 = rect.centerY() - textHeight / 2 - ((textPaint.descent() + textPaint.ascent()) / 2)
                         val textY2 = rect.centerY() + textHeight / 2 - ((textPaint.descent() + textPaint.ascent()) / 2)
@@ -274,7 +312,7 @@ class KeyboardView @JvmOverloads constructor(
                         canvas.drawText(line2, rect.centerX(), textY2, textPaint)
                     } else {
                         val textY = rect.centerY() - ((textPaint.descent() + textPaint.ascent()) / 2)
-                        canvas.drawText(key.label, rect.centerX(), textY, textPaint)
+                        canvas.drawText(labelToDraw, rect.centerX(), textY, textPaint)
                     }
                     textPaint.textSize = originalSize
                 }
@@ -345,7 +383,8 @@ class KeyboardView @JvmOverloads constructor(
                 }
                 
                 // Draw hint
-                if (key.codes.length == 1 && key.label.length == 1 && key.sublabel == null && key.sublabel2 == null) {
+                val showHints = LongPressSettingsManager.getShowHints(context)
+                if (showHints && key.codes.length == 1 && key.label.length == 1 && key.sublabel == null && key.sublabel2 == null) {
                     val hints = getAccentsForKey(key.codes)
                     if (hints.isNotEmpty()) {
                         val hintChar = hints[0]
@@ -383,7 +422,8 @@ class KeyboardView @JvmOverloads constructor(
                 lastScrubCursorDiff = 0
                 isSpaceScrubbing = false
                 isDeleteScrubbing = false
-                handler.postDelayed(longPressRunnable, 400)
+                val delay = LongPressSettingsManager.getLongPressDelay(context).toLong()
+                handler.postDelayed(longPressRunnable, delay)
                 invalidate()
             }
         }
@@ -450,7 +490,8 @@ class KeyboardView @JvmOverloads constructor(
                         if (newKey != null && newKey.codes.isNotEmpty()) {
                             pressedKey = newKey
                             isPressedValid = true
-                            handler.postDelayed(longPressRunnable, 400)
+                            val delay = LongPressSettingsManager.getLongPressDelay(context).toLong()
+                            handler.postDelayed(longPressRunnable, delay)
                         } else {
                             pressedKey = null
                             isPressedValid = false
@@ -479,7 +520,13 @@ class KeyboardView @JvmOverloads constructor(
                 dismissAccentPopup()
             } else if (isPressedValid && pressedKey != null) {
                 if (!isSpaceScrubbing && !isDeleteScrubbing) {
-                    pressedKey?.codes?.let { listener?.onKeyPress(it) }
+                    val code = pressedKey?.codes
+                    if (code == ",") {
+                        val dynamicCode = if (isUriField) "/" else if (isEmailField) "@" else ","
+                        listener?.onKeyPress(dynamicCode)
+                    } else if (code != null) {
+                        listener?.onKeyPress(code)
+                    }
                 }
             }
             pressedKey = null
@@ -534,6 +581,7 @@ class KeyboardView @JvmOverloads constructor(
             "SETTINGS" -> "⚙️"
             "ONE_HAND" -> "🗗"
             "CLIPBOARD" -> "📋"
+            "PROMPT_LIST" -> "⚡"
             "DSK_PGUP" -> "PgUp"
             "DSK_PGDN" -> "PgDn"
             "DSK_DELLINE" -> "DelLine"
@@ -583,7 +631,7 @@ class KeyboardView @JvmOverloads constructor(
             "m" -> listOf("?")
             "!" -> listOf("¡")
             "?" -> listOf("¿")
-            "mode_symbols" -> listOf("MODE_NUMPAD", "MODE_EMOJI", "MODE_NAVIGATION", "MODE_SYMBOLS_SHIFT", "MODE_DESKTOP")
+            "mode_symbols" -> LongPressSettingsManager.getSymbolsKeys(context)
             "+" -> listOf("(")
             "-" -> listOf(")")
             "*" -> listOf("/")
@@ -591,8 +639,14 @@ class KeyboardView @JvmOverloads constructor(
             "%" -> listOf("₹", "$", "¢", "€", "£", "¥")
             ":" -> listOf(";")
             "_" -> listOf("|")
-            "." -> listOf("&", "%", "+", "\"", "-", ":", "'", "@", ";", "/", "(", ")", "#", "!", ",", "?", "]", "[")
-            "," -> listOf("MODE_EMOJI", "SETTINGS", "CLIPBOARD")
+            "." -> {
+                if (isUriField) {
+                    LongPressSettingsManager.getUrlDomains(context)
+                } else {
+                    listOf(".com", ".org", ".net", "&", "%", "+", "\"", "-", ":", "'", "@", ";", "/", "(", ")", "#", "!", ",", "?")
+                }
+            }
+            "," -> LongPressSettingsManager.getCommaKeys(context)
             else -> emptyList()
         }
     }
@@ -607,7 +661,7 @@ class KeyboardView @JvmOverloads constructor(
             tracker.isPressedValid = false
             invalidate()
         } else if (key.codes == "DEL") {
-            listener?.onLongPressBackspace()
+            // No destructive long press paragraph delete; user can swipe left on backspace to delete
             tracker.pressedKey = null
             tracker.isPressedValid = false
             invalidate()

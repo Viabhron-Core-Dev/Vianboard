@@ -5,8 +5,14 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface PersonalDictionaryDao {
+    @Query("SELECT * FROM personal_dictionary ORDER BY id DESC")
+    fun getAllPrompts(): Flow<List<PersonalDictionaryItem>>
+
     @Query("SELECT * FROM personal_dictionary ORDER BY word ASC")
     fun getAllWords(): Flow<List<PersonalDictionaryItem>>
+
+    @Query("SELECT * FROM personal_dictionary ORDER BY id DESC")
+    fun getAllSync(): List<PersonalDictionaryItem>
 
     @Query("SELECT * FROM personal_dictionary WHERE word LIKE :prefix || '%' ORDER BY frequency DESC LIMIT :limit")
     suspend fun getSuggestions(prefix: String, limit: Int): List<PersonalDictionaryItem>
@@ -16,6 +22,9 @@ interface PersonalDictionaryDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(item: PersonalDictionaryItem)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    fun insertSync(item: PersonalDictionaryItem)
 
     @Delete
     suspend fun delete(item: PersonalDictionaryItem)

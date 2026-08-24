@@ -40,11 +40,6 @@ class ClipboardAdapter(
         fun bind(item: ClipboardItem) {
             tvClipText.text = item.text
             ivPin.visibility = if (item.isPinned) View.VISIBLE else View.GONE
-            
-            // For a pinned item, we could show a filled pin, for unpinned a hidden pin or outlined pin
-            if (item.isPinned) {
-                ivPin.setImageResource(android.R.drawable.star_on)
-            }
 
             itemView.setOnClickListener {
                 onItemClicked(item)

@@ -1,21 +1,15 @@
 package com.example.keyboard
 
 import android.content.Context
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.Paint
-import android.graphics.RectF
+import android.graphics.*
 import android.os.Handler
 import android.os.Looper
 import android.text.TextPaint
 import android.text.TextUtils
 import android.view.MotionEvent
 import android.view.View
-import android.view.ViewGroup
-import android.widget.PopupWindow
-import android.widget.LinearLayout
-import android.widget.TextView
-import android.view.Gravity
+import com.example.keyboard.desktop.DesktopShortcutsManager
+import com.example.keyboard.longpress.LongPressSettingsManager
 
 interface DesktopKeyListener {
     fun onDesktopKey(code: String)
@@ -27,8 +21,8 @@ data class DesktopKey(
     val sublabel: String = "",
     val longPressCode: String = "",
     val longPressLabel: String = "",
-    val longPressOptions: List<String> = emptyList(),
-    val isFunctional: Boolean = false
+    val isFunctional: Boolean = false,
+    val weight: Float = 1.0f
 ) {
     var rect: RectF = RectF()
     var isPressed: Boolean = false
@@ -42,87 +36,115 @@ class DesktopKeyboardView(context: Context) : View(context) {
     private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG)
     private val subTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG)
     private val lpTextPaint = TextPaint(Paint.ANTI_ALIAS_FLAG)
-    
+
     private val keys = mutableListOf<List<DesktopKey>>()
-    
     private var pressedKey: DesktopKey? = null
     private val handler = Handler(Looper.getMainLooper())
     private val longPressRunnable = Runnable { triggerLongPress() }
-    
-    private var popupWindow: PopupWindow? = null
     private var isLongPressTriggered = false
-    
+
     init {
         textPaint.color = Color.WHITE
         textPaint.textAlign = Paint.Align.CENTER
-        
-        subTextPaint.color = Color.parseColor("#888888")
+        textPaint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+
+        subTextPaint.color = Color.parseColor("#9E9E9E")
         subTextPaint.textAlign = Paint.Align.CENTER
-        
-        lpTextPaint.color = Color.parseColor("#666666")
+
+        lpTextPaint.color = Color.parseColor("#757575")
         lpTextPaint.textAlign = Paint.Align.RIGHT
 
         setupKeys()
     }
 
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        reloadKeys()
+    }
+
+    fun reloadKeys() {
+        setupKeys()
+        if (width > 0 && height > 0) {
+            calculateKeyRects(width, height)
+        }
+        invalidate()
+    }
+
     private fun setupKeys() {
-        keys.add(listOf(
-            DesktopKey("1", "1", "", "", "", listOf("¹", "½")),
-            DesktopKey("2", "2", "", "", "", listOf("²", "⅔")),
-            DesktopKey("3", "3", "", "", "", listOf("³", "¾")),
-            DesktopKey("4", "4", "", "", "", listOf("⁴")),
-            DesktopKey("5", "5", "", "", "", listOf("⁵", "⅝")),
-            DesktopKey("6", "6", "", "", "", listOf("⁶")),
-            DesktopKey("7", "7", "", "", "", listOf("⁷", "⅞")),
-            DesktopKey("8", "8", "", "", "", listOf("⁸")),
-            DesktopKey("9", "9", "", "", "", listOf("⁹")),
-            DesktopKey("0", "0", "", "", "", listOf("⁰", "∅"))
-        ))
-        
-        keys.add(listOf(
-            DesktopKey("DSK_ESC", "ESC", "Esc", isFunctional = true),
-            DesktopKey("DSK_TAB", "TAB", "Tab", isFunctional = true),
-            DesktopKey("DSK_STABF", "S+TAB", "Sh+Tab", isFunctional = true),
-            DesktopKey("DSK_F1", "F1", "F1", isFunctional = true),
-            DesktopKey("DSK_FINDREPLACE", "C+H", "Ctrl+H", isFunctional = true),
-            DesktopKey("DSK_UP", "↑", "Up", "DSK_PGUP", "PgUp", isFunctional = true),
-            DesktopKey("DSK_HOME", "HOME", "Home", isFunctional = true),
-            DesktopKey("DSK_END", "END", "End", isFunctional = true),
-            DesktopKey("DSK_UNDO", "UNDO", "Ctrl+Z", isFunctional = true),
-            DesktopKey("DSK_REDO", "REDO", "Ctrl+Y", isFunctional = true)
-        ))
-        
-        keys.add(listOf(
-            DesktopKey("DSK_SELWORD", "SELWRD", "Ct+Sh+→", "DSK_SELALL", "SelAll ↗", isFunctional = true),
-            DesktopKey("DSK_COPY", "COPY", "Ctrl+C", isFunctional = true),
-            DesktopKey("DSK_CUT", "CUT", "Ctrl+X", isFunctional = true),
-            DesktopKey("DSK_PASTE", "PASTE", "Ctrl+V", isFunctional = true),
-            DesktopKey("DSK_LEFT", "←", "Left", isFunctional = true),
-            DesktopKey("DSK_SEL", "SEL", "Shift", isFunctional = true),
-            DesktopKey("DSK_RIGHT", "→", "Right", isFunctional = true),
-            DesktopKey("DSK_DUPLINE", "C+D", "Ctrl+D", isFunctional = true),
-            DesktopKey("DSK_COMMENT", "C+/", "Ctrl+/", isFunctional = true),
-            DesktopKey("DSK_BKSP", "BKSP", "Bksp", "DSK_DEL", "FwdDel ↗", isFunctional = true) // long press FwdDel
-        ))
-        
-        keys.add(listOf(
-            DesktopKey("DSK_INDENT", "INDENT", "Tab", isFunctional = true),
-            DesktopKey("DSK_DEDENT", "DEDENT", "Sh+Tab", isFunctional = true),
-            DesktopKey("DSK_GOTOLINE", "C+G", "Ctrl+G", isFunctional = true),
-            DesktopKey("DSK_COMMENT2", "REM", "Ctrl+/", isFunctional = true),
-            DesktopKey("DSK_GOTOLINE2", "GOTO", "Ctrl+G", isFunctional = true),
-            DesktopKey("DSK_DOWN", "↓", "Down", "DSK_PGDN", "PgDn ↗", isFunctional = true),
-            DesktopKey("DSK_DELLINE", "C+K", "Ctrl+Sh+K", isFunctional = true),
-            DesktopKey("DSK_DEL", "DEL", "Del", "DSK_DELLINE", "DelLine ↗", isFunctional = true) // long press DelLine
-        ))
-        
-        keys.add(listOf(
-            DesktopKey("MODE_ALPHABET", "ABC", isFunctional = true),
-            DesktopKey(",", ","),
-            DesktopKey("SPACE", "Space", isFunctional = true),
-            DesktopKey(".", ".", "", "", "", listOf("&", "%", "+", "\"", "-", ":", "'", "@", ";", "/", "(", ")", "#", "!", ",", "?", "]", "[")),
-            DesktopKey("DSK_ENTER", "ENTER", "Enter", "DSK_SAVE", "Save ↗", isFunctional = true)
-        ))
+        keys.clear()
+        val customShortcuts = DesktopShortcutsManager.getEnabledShortcuts(context)
+
+        if (customShortcuts.isEmpty()) {
+            // Default Layout: Pure Fat Directional Pad + Core Essentials
+            // Row 0: Home, Up Arrow, End
+            keys.add(
+                listOf(
+                    DesktopKey("DSK_HOME", "HOME", "Start", isFunctional = true, weight = 1.0f),
+                    DesktopKey("DSK_UP", "▲", "Up", "DSK_PGUP", "PgUp", isFunctional = true, weight = 1.5f),
+                    DesktopKey("DSK_END", "END", "End", isFunctional = true, weight = 1.0f)
+                )
+            )
+
+            // Row 1: Left Arrow, Down Arrow, Right Arrow
+            keys.add(
+                listOf(
+                    DesktopKey("DSK_LEFT", "◀", "Left", isFunctional = true, weight = 1.2f),
+                    DesktopKey("DSK_DOWN", "▼", "Down", "DSK_PGDN", "PgDn", isFunctional = true, weight = 1.2f),
+                    DesktopKey("DSK_RIGHT", "▶", "Right", isFunctional = true, weight = 1.2f)
+                )
+            )
+
+            // Row 2: Bottom Bar (ABC, Select, Space, Backspace, Enter)
+            keys.add(
+                listOf(
+                    DesktopKey("MODE_ALPHABET", "ABC", "", isFunctional = true, weight = 1.2f),
+                    DesktopKey("DSK_SEL", "SEL", "Select", isFunctional = true, weight = 1.0f),
+                    DesktopKey("SPACE", "Space", "", isFunctional = false, weight = 2.0f),
+                    DesktopKey("DSK_BKSP", "⌫", "Del", "DSK_DEL", "FwdDel", isFunctional = true, weight = 1.2f),
+                    DesktopKey("DSK_ENTER", "↵", "Enter", isFunctional = true, weight = 1.2f)
+                )
+            )
+        } else {
+            // Customized Layout with Fat Buttons
+            // Convert custom shortcut IDs to DesktopKey objects
+            val customKeys = customShortcuts.mapNotNull { id ->
+                val item = DesktopShortcutsManager.getShortcutItem(id) ?: return@mapNotNull null
+                DesktopKey(item.actionCode, item.label, item.sublabel, isFunctional = true, weight = 1.0f)
+            }
+
+            // Split custom keys across 2 rows (max 3 custom keys per row)
+            val half = (customKeys.size + 1) / 2
+            val topCustom = customKeys.take(half)
+            val midCustom = customKeys.drop(half)
+
+            // Row 0: Top Custom Keys + Up Arrow (+ optional Home)
+            val row0 = mutableListOf<DesktopKey>()
+            row0.addAll(topCustom)
+            if (row0.isEmpty()) {
+                row0.add(DesktopKey("DSK_HOME", "HOME", "Start", isFunctional = true, weight = 1.0f))
+            }
+            row0.add(DesktopKey("DSK_UP", "▲", "Up", "DSK_PGUP", "PgUp", isFunctional = true, weight = 1.4f))
+            keys.add(row0)
+
+            // Row 1: Mid Custom Keys + Left, Down, Right Arrows
+            val row1 = mutableListOf<DesktopKey>()
+            row1.addAll(midCustom)
+            row1.add(DesktopKey("DSK_LEFT", "◀", "Left", isFunctional = true, weight = 1.0f))
+            row1.add(DesktopKey("DSK_DOWN", "▼", "Down", "DSK_PGDN", "PgDn", isFunctional = true, weight = 1.0f))
+            row1.add(DesktopKey("DSK_RIGHT", "▶", "Right", isFunctional = true, weight = 1.0f))
+            keys.add(row1)
+
+            // Row 2: Bottom Bar (ABC, SEL, Space, Del, Enter)
+            keys.add(
+                listOf(
+                    DesktopKey("MODE_ALPHABET", "ABC", "", isFunctional = true, weight = 1.2f),
+                    DesktopKey("DSK_SEL", "SEL", "Select", isFunctional = true, weight = 1.0f),
+                    DesktopKey("SPACE", "Space", "", isFunctional = false, weight = 2.0f),
+                    DesktopKey("DSK_BKSP", "⌫", "Del", "DSK_DEL", "FwdDel", isFunctional = true, weight = 1.2f),
+                    DesktopKey("DSK_ENTER", "↵", "Enter", isFunctional = true, weight = 1.2f)
+                )
+            )
+        }
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
@@ -131,56 +153,39 @@ class DesktopKeyboardView(context: Context) : View(context) {
     }
 
     private fun calculateKeyRects(w: Int, h: Int) {
-        val rowHeight = h / 5f
-        val padding = 4f
-        
-        for (rowIndex in 0..4) {
+        if (keys.isEmpty()) return
+        val rowCount = keys.size
+        val rowHeight = h / rowCount.toFloat()
+        val padding = 5f
+
+        for (rowIndex in 0 until rowCount) {
             val row = keys[rowIndex]
-            val keyCount = row.size
-            
-            if (rowIndex < 4) {
-                val keyWidth = w / keyCount.toFloat()
-                for (i in 0 until keyCount) {
-                    val key = row[i]
-                    key.rect.set(
-                        i * keyWidth + padding,
-                        rowIndex * rowHeight + padding,
-                        (i + 1) * keyWidth - padding,
-                        (rowIndex + 1) * rowHeight - padding
-                    )
-                }
-            } else {
-                // Row 5
-                val standardKeyWidth = w / 10f * 1.5f
-                var currentX = 0f
-                for (i in 0 until keyCount) {
-                    val key = row[i]
-                    val kw = if (key.code == "SPACE") {
-                        w - (keyCount - 1) * standardKeyWidth
-                    } else {
-                        standardKeyWidth
-                    }
-                    key.rect.set(
-                        currentX + padding,
-                        rowIndex * rowHeight + padding,
-                        currentX + kw - padding,
-                        (rowIndex + 1) * rowHeight - padding
-                    )
-                    currentX += kw
-                }
+            val totalWeight = row.sumOf { it.weight.toDouble() }.toFloat()
+            var currentX = 0f
+
+            for (key in row) {
+                val keyWidth = (key.weight / totalWeight) * w
+                key.rect.set(
+                    currentX + padding,
+                    rowIndex * rowHeight + padding,
+                    currentX + keyWidth - padding,
+                    (rowIndex + 1) * rowHeight - padding
+                )
+                currentX += keyWidth
             }
         }
     }
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        
-        val density = resources.configuration.fontScale * resources.displayMetrics.density
-        val normalBgColor = Color.parseColor("#333333")
-        val functionalBgColor = Color.parseColor("#262626")
-        val pressedBgColor = Color.parseColor("#555555")
-        val selActiveColor = Color.parseColor("#4CAF50")
-        
+
+        val density = resources.displayMetrics.density
+        val normalBgColor = Color.parseColor("#383838")
+        val functionalBgColor = Color.parseColor("#2A2A2A")
+        val pressedBgColor = Color.parseColor("#5A5A5A")
+        val selActiveColor = Color.parseColor("#1976D2")
+        val cornerRadius = 14f * density
+
         for (row in keys) {
             for (key in row) {
                 // Background
@@ -190,65 +195,50 @@ class DesktopKeyboardView(context: Context) : View(context) {
                     key.isFunctional -> functionalBgColor
                     else -> normalBgColor
                 }
-                canvas.drawRoundRect(key.rect, 12f, 12f, bgPaint)
-                
+                canvas.drawRoundRect(key.rect, cornerRadius, cornerRadius, bgPaint)
+
                 // Main label
-                textPaint.textSize = 13f * density
-                val maxLabelWidth = key.rect.width() - 8f * density
-                
-                var labelText = key.label
-                var lines = listOf(labelText)
-                
-                if (textPaint.measureText(labelText) > maxLabelWidth && labelText.contains(" ")) {
-                    val parts = labelText.split(" ", limit = 2)
-                    lines = parts
-                    textPaint.textSize = 11f * density
-                } else if (textPaint.measureText(labelText) > maxLabelWidth) {
-                    val mid = labelText.length / 2
-                    lines = listOf(labelText.substring(0, mid), labelText.substring(mid))
-                    textPaint.textSize = 11f * density
-                }
-                
-                val textHeight = textPaint.descent() - textPaint.ascent()
-                
-                if (lines.size == 1) {
-                    val textY = key.rect.top + key.rect.height() * 0.4f - ((textPaint.descent() + textPaint.ascent()) / 2)
-                    canvas.drawText(lines[0], key.rect.centerX(), textY, textPaint)
+                textPaint.textSize = if (key.code.startsWith("DSK_") && (key.label == "▲" || key.label == "▼" || key.label == "◀" || key.label == "▶")) {
+                    22f * density
+                } else if (key.label.length > 4) {
+                    13f * density
                 } else {
-                    val startY = key.rect.top + key.rect.height() * 0.4f - textHeight
-                    canvas.drawText(lines[0], key.rect.centerX(), startY, textPaint)
-                    canvas.drawText(lines[1], key.rect.centerX(), startY + textHeight, textPaint)
+                    16f * density
                 }
-                
+
+                val hasSublabel = key.sublabel.isNotEmpty()
+                val centerYOffset = if (hasSublabel) key.rect.height() * 0.38f else key.rect.height() * 0.5f
+                val textY = key.rect.top + centerYOffset - ((textPaint.descent() + textPaint.ascent()) / 2)
+                canvas.drawText(key.label, key.rect.centerX(), textY, textPaint)
+
                 // Sublabel
-                if (key.sublabel.isNotEmpty()) {
-                    subTextPaint.textSize = 9f * density
+                if (hasSublabel) {
+                    subTextPaint.textSize = 10f * density
                     var sublabelToDraw = key.sublabel
+                    val maxLabelWidth = key.rect.width() - 8f * density
                     if (subTextPaint.measureText(sublabelToDraw) > maxLabelWidth) {
                         sublabelToDraw = TextUtils.ellipsize(sublabelToDraw, subTextPaint, maxLabelWidth, TextUtils.TruncateAt.END).toString()
                     }
-                    val subY = key.rect.top + key.rect.height() * 0.75f - ((subTextPaint.descent() + subTextPaint.ascent()) / 2)
+                    val subY = key.rect.top + key.rect.height() * 0.76f - ((subTextPaint.descent() + subTextPaint.ascent()) / 2)
                     canvas.drawText(sublabelToDraw, key.rect.centerX(), subY, subTextPaint)
                 }
-                
+
                 // Long press indicator
-                if (key.longPressCode.isNotEmpty() || key.longPressOptions.isNotEmpty()) {
-                    lpTextPaint.textSize = 8f * density
-                    val lpX = key.rect.right - 4f * density
-                    val lpY = key.rect.bottom - 4f * density
-                    var lpText = key.longPressLabel
-                    if (lpText.isEmpty()) lpText = "↘"
-                    canvas.drawText(lpText, lpX, lpY, lpTextPaint)
+                if (key.longPressLabel.isNotEmpty()) {
+                    lpTextPaint.textSize = 9f * density
+                    val lpX = key.rect.right - 6f * density
+                    val lpY = key.rect.bottom - 6f * density
+                    canvas.drawText(key.longPressLabel, lpX, lpY, lpTextPaint)
                 }
             }
         }
     }
-    
+
     fun toggleSelectMode() {
         isSelectMode = !isSelectMode
         invalidate()
     }
-    
+
     fun disarmSelectMode() {
         if (isSelectMode) {
             isSelectMode = false
@@ -259,7 +249,7 @@ class DesktopKeyboardView(context: Context) : View(context) {
     override fun onTouchEvent(event: MotionEvent): Boolean {
         val x = event.x
         val y = event.y
-        
+
         when (event.action) {
             MotionEvent.ACTION_DOWN -> {
                 val key = findKey(x, y)
@@ -267,7 +257,8 @@ class DesktopKeyboardView(context: Context) : View(context) {
                     pressedKey = key
                     key.isPressed = true
                     isLongPressTriggered = false
-                    handler.postDelayed(longPressRunnable, 500)
+                    val delay = LongPressSettingsManager.getLongPressDelay(context).toLong()
+                    handler.postDelayed(longPressRunnable, delay)
                     invalidate()
                 }
                 return true
@@ -322,9 +313,9 @@ class DesktopKeyboardView(context: Context) : View(context) {
             listener?.onDesktopKey(key.code)
             return
         }
-        
+
         var codeToSend = key.code
-        
+
         if (isSelectMode) {
             when (key.code) {
                 "DSK_LEFT" -> codeToSend = "DSK_SEL_LEFT"
@@ -333,9 +324,9 @@ class DesktopKeyboardView(context: Context) : View(context) {
                 "DSK_DOWN" -> codeToSend = "DSK_SEL_DOWN"
             }
         }
-        
+
         listener?.onDesktopKey(codeToSend)
-        
+
         if (key.code == "DSK_COPY" || key.code == "DSK_CUT" || key.code == "DSK_BKSP") {
             disarmSelectMode()
         }
@@ -344,53 +335,13 @@ class DesktopKeyboardView(context: Context) : View(context) {
     private fun triggerLongPress() {
         val key = pressedKey ?: return
         isLongPressTriggered = true
-        
-        if (key.longPressOptions.isNotEmpty()) {
-            showPopup(key)
-        } else if (key.longPressCode.isNotEmpty()) {
+
+        if (key.longPressCode.isNotEmpty()) {
             listener?.onDesktopKey(key.longPressCode)
         }
-        
+
         key.isPressed = false
         pressedKey = null
         invalidate()
-    }
-
-    private fun showPopup(key: DesktopKey) {
-        val popupView = LinearLayout(context).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setBackgroundColor(Color.parseColor("#444444"))
-            setPadding(10, 10, 10, 10)
-        }
-        
-        for (opt in key.longPressOptions) {
-            val tv = TextView(context).apply {
-                text = opt
-                setTextColor(Color.WHITE)
-                textSize = 20f
-                setPadding(30, 20, 30, 20)
-                gravity = Gravity.CENTER
-                isClickable = true
-                setOnClickListener {
-                    listener?.onDesktopKey(opt)
-                    popupWindow?.dismiss()
-                }
-            }
-            popupView.addView(tv)
-        }
-        
-        popupWindow = PopupWindow(
-            popupView,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            ViewGroup.LayoutParams.WRAP_CONTENT,
-            true
-        )
-        
-        val location = IntArray(2)
-        getLocationInWindow(location)
-        val x = (location[0] + key.rect.centerX() - (key.longPressOptions.size * 100) / 2).toInt().coerceAtLeast(0)
-        val y = (location[1] + key.rect.top - 150).toInt()
-        
-        popupWindow?.showAtLocation(this, Gravity.NO_GRAVITY, x, y)
     }
 }

@@ -16,9 +16,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.zip.ZipInputStream
 import com.example.keyboard.engine.KeyboardEngineCoordinator
-import com.example.keyboard.engine.UserDictionaryEntry
 import com.example.logkeeper.TheLogKeeper
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
@@ -28,180 +29,167 @@ import kotlinx.coroutines.withContext
 @Composable
 fun DictionarySettingsScreen(onClose: () -> Unit, onOpenPersonalDictionary: () -> Unit) {
     val context = LocalContext.current
-    val prefs = context.getSharedPreferences("keyboard_prefs", Context.MODE_PRIVATE)
+    val prefs = remember { context.getSharedPreferences("keyboard_prefs", Context.MODE_PRIVATE) }
     
-    var isImportingDictionary by remember { mutableStateOf(false) }
-    var isMigratingDatabase by remember { mutableStateOf(false) }
-    var autoCorrectAggressiveness by remember { mutableStateOf(prefs.getFloat("autocorrect_aggressiveness", 1.0f)) }
-    var useTransformerEngine by remember { mutableStateOf(prefs.getBoolean("use_transformer", false)) }
+    var isProcessing by remember { mutableStateOf(false) }
+    var processingMessage by remember { mutableStateOf("") }
+    
+    var autoCorrectAggressiveness by remember { 
+        mutableStateOf(prefs.getFloat("autocorrect_aggressiveness", 1.0f)) 
+    }
+    var nextWordPrediction by remember { 
+        mutableStateOf(prefs.getBoolean("next_word_prediction", true)) 
+    }
+
+    val supportedLanguages = listOf(
+        "en" to "English",
+        "fr" to "French (Français)",
+        "es" to "Spanish (Español)",
+        "de" to "German (Deutsch)",
+        "it" to "Italian (Italiano)",
+        "pt" to "Portuguese (Português)"
+    )
+
+    val secondaryOptions = listOf("none" to "None (Disabled)") + supportedLanguages
+
+    var primaryLanguage by remember {
+        mutableStateOf(prefs.getString("primary_language", "en") ?: "en")
+    }
+    var secondaryLanguage by remember {
+        mutableStateOf(prefs.getString("secondary_language", "none") ?: "none")
+    }
+
+    var primaryExpanded by remember { mutableStateOf(false) }
+    var secondaryExpanded by remember { mutableStateOf(false) }
     
     val scope = rememberCoroutineScope()
     val coordinator = remember { KeyboardEngineCoordinator.getInstance(context) }
     val personalDao = remember { ClipboardDatabase.getDatabase(context).personalDictionaryDao() }
 
-    // Binary .dict file launcher
+    // HeliBoard Backup ZIP Launcher (.zip)
+    val backupZipLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        uri?.let {
+            TheLogKeeper.getInstance(context).log("INFO", "DictionarySettings", "HELIPACK_ZIP_TRIGGERED | uri=[$it]")
+            scope.launch {
+                try {
+                    withContext(Dispatchers.Main) {
+                        isProcessing = true
+                        processingMessage = "Extracting HeliBoard backup (.zip)..."
+                    }
+                    
+                    var dictCount = 0
+                    var userWordCount = 0
+                    
+                    withContext(Dispatchers.IO) {
+                        val dictDir = File(context.filesDir, "dictionaries")
+                        if (!dictDir.exists()) dictDir.mkdirs()
+                        
+                        context.contentResolver.openInputStream(it)?.use { rawStream ->
+                            val zipInput = ZipInputStream(rawStream)
+                            var entry = zipInput.nextEntry
+                            
+                            while (entry != null) {
+                                val name = entry.name
+                                val lowerName = name.lowercase()
+                                
+                                if (!entry.isDirectory) {
+                                    if (lowerName.endsWith(".dict")) {
+                                        val simpleName = File(name).name
+                                        val destFile = File(dictDir, "imported_${System.currentTimeMillis()}_$simpleName")
+                                        destFile.outputStream().use { out ->
+                                            zipInput.copyTo(out)
+                                        }
+                                        val success = coordinator.loadBinaryDictionary(destFile)
+                                        if (success) dictCount++
+                                        TheLogKeeper.getInstance(context).log(
+                                            "INFO", 
+                                            "DictionarySettings", 
+                                            "ZIP_DICT_LOADED | file=$simpleName | success=$success"
+                                        )
+                                    } else if (lowerName.contains("user_dict") || lowerName.contains("personal_dict") ||
+                                        lowerName.endsWith(".tsv") || lowerName.endsWith(".txt")) {
+                                        val byteOut = ByteArrayOutputStream()
+                                        val buffer = ByteArray(4096)
+                                        var len: Int
+                                        while (zipInput.read(buffer).also { len = it } > 0) {
+                                            byteOut.write(buffer, 0, len)
+                                        }
+                                        val content = byteOut.toString("UTF-8")
+                                        content.lines().forEach { line ->
+                                            val trimmed = line.trim()
+                                            if (trimmed.isNotEmpty() && !trimmed.startsWith("#")) {
+                                                val parts = trimmed.split("\t", " ")
+                                                if (parts.isNotEmpty()) {
+                                                    val word = parts[0]
+                                                    val shortcut = if (parts.size > 1 && parts[1].isNotBlank()) parts[1] else null
+                                                    personalDao.insert(PersonalDictionaryItem(word = word, shortcut = shortcut, frequency = 250))
+                                                    userWordCount++
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                zipInput.closeEntry()
+                                entry = zipInput.nextEntry
+                            }
+                        }
+                    }
+                    
+                    withContext(Dispatchers.Main) {
+                        isProcessing = false
+                        Toast.makeText(
+                            context,
+                            "Imported $dictCount dictionaries and $userWordCount user words!",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main) {
+                        isProcessing = false
+                        Toast.makeText(context, "Failed to import backup: ${e.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            }
+        }
+    }
+
+    // Binary Dict File Launcher (.dict)
     val binaryDictLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri: Uri? ->
         uri?.let {
-            TheLogKeeper.getInstance(context).log("INFO", "DictionarySettingsScreen", "BINARY_DICT_IMPORT_TRIGGERED | uri=[$it]")
             scope.launch {
                 try {
-                    withContext(Dispatchers.Main) { isImportingDictionary = true }
-                    withContext(Dispatchers.IO) {
+                    withContext(Dispatchers.Main) {
+                        isProcessing = true
+                        processingMessage = "Importing binary dictionary..."
+                    }
+                    val success = withContext(Dispatchers.IO) {
                         val dictDir = File(context.filesDir, "dictionaries")
                         if (!dictDir.exists()) dictDir.mkdirs()
                         val destFile = File(dictDir, "imported_${System.currentTimeMillis()}.dict")
                         context.contentResolver.openInputStream(it)?.use { input ->
-                            destFile.outputStream().use { output -> input.copyTo(output) }
-                        }
-                        val success = coordinator.loadBinaryDictionary(destFile)
-                        TheLogKeeper.getInstance(context).log("INFO", "DictionarySettingsScreen", "BINARY_DICT_LOAD_RESULT | success=$success | path=${destFile.absolutePath}")
-                    }
-                    Toast.makeText(context, "HeliBoard Binary Dictionary (.dict) imported!", Toast.LENGTH_SHORT).show()
-                } catch (e: Exception) {
-                    TheLogKeeper.getInstance(context).log("ERROR", "DictionarySettingsScreen", "BINARY_DICT_IMPORT_FAILED | ${e.message}")
-                    Toast.makeText(context, "Failed to import .dict: ${e.message}", Toast.LENGTH_SHORT).show()
-                } finally {
-                    withContext(Dispatchers.Main) { isImportingDictionary = false }
-                }
-            }
-        }
-    }
-
-    // HeliBoard Personal Dictionary / Backup launcher (.tsv, .txt, .json)
-    val backupLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        uri?.let {
-            TheLogKeeper.getInstance(context).log("INFO", "DictionarySettingsScreen", "BACKUP_IMPORT_TRIGGERED | uri=[$it]")
-            scope.launch {
-                try {
-                    withContext(Dispatchers.Main) { isImportingDictionary = true }
-                    var count = 0
-                    withContext(Dispatchers.IO) {
-                        context.contentResolver.openInputStream(it)?.bufferedReader()?.useLines { lines ->
-                            for (line in lines) {
-                                val trimmed = line.trim()
-                                if (trimmed.isEmpty() || trimmed.startsWith("#")) continue
-                                val parts = trimmed.split("\t", ",", ":", " ")
-                                if (parts.isNotEmpty()) {
-                                    val word = parts[0].trim()
-                                    val shortcut = parts.getOrNull(1)?.trim()?.takeIf { it.isNotEmpty() }
-                                    val freq = parts.getOrNull(2)?.trim()?.toIntOrNull() ?: 250
-                                    if (word.isNotBlank()) {
-                                        personalDao.insert(PersonalDictionaryItem(word = word, shortcut = shortcut, frequency = freq))
-                                        count++
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    TheLogKeeper.getInstance(context).log("INFO", "DictionarySettingsScreen", "BACKUP_IMPORTED | entries=$count")
-                    Toast.makeText(context, "Imported $count entries into Personal Dictionary!", Toast.LENGTH_SHORT).show()
-                } catch (e: Exception) {
-                    TheLogKeeper.getInstance(context).log("ERROR", "DictionarySettingsScreen", "BACKUP_IMPORT_FAILED | ${e.message}")
-                    Toast.makeText(context, "Failed to import backup: ${e.message}", Toast.LENGTH_SHORT).show()
-                } finally {
-                    withContext(Dispatchers.Main) { isImportingDictionary = false }
-                }
-            }
-        }
-    }
-
-    val tfliteLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        uri?.let {
-            scope.launch {
-                try {
-                    withContext(Dispatchers.IO) {
-                        val modelDir = File(context.filesDir, "transformer")
-                        if (!modelDir.exists()) modelDir.mkdirs()
-                        val destinationFile = File(modelDir, "model.tflite")
-                        context.contentResolver.openInputStream(it)?.use { input ->
-                            destinationFile.outputStream().use { output ->
+                            destFile.outputStream().use { output ->
                                 input.copyTo(output)
                             }
                         }
+                        coordinator.loadBinaryDictionary(destFile)
                     }
-                    Toast.makeText(context, "Transformer model imported!", Toast.LENGTH_SHORT).show()
-                } catch (e: Exception) {
-                    Toast.makeText(context, "Failed to import model: ${e.message}", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-    }
-
-    val vocabLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        uri?.let {
-            scope.launch {
-                try {
-                    withContext(Dispatchers.IO) {
-                        val modelDir = File(context.filesDir, "transformer")
-                        if (!modelDir.exists()) modelDir.mkdirs()
-                        val destinationFile = File(modelDir, "vocab.txt")
-                        context.contentResolver.openInputStream(it)?.use { input ->
-                            destinationFile.outputStream().use { output ->
-                                input.copyTo(output)
-                            }
+                    withContext(Dispatchers.Main) {
+                        isProcessing = false
+                        if (success) {
+                            Toast.makeText(context, "Binary dictionary imported successfully!", Toast.LENGTH_SHORT).show()
+                        } else {
+                            Toast.makeText(context, "Failed to parse binary dictionary", Toast.LENGTH_SHORT).show()
                         }
                     }
-                    Toast.makeText(context, "Vocabulary file imported!", Toast.LENGTH_SHORT).show()
                 } catch (e: Exception) {
-                    Toast.makeText(context, "Failed to import vocab: ${e.message}", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-    }
-
-    val textDictLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        uri?.let {
-            TheLogKeeper.getInstance(context).log("INFO", "DictionarySettingsScreen", "DICT_IMPORT_TRIGGERED | uri=[$it]")
-            scope.launch {
-                try {
-                    withContext(Dispatchers.Main) { isImportingDictionary = true }
-                    withContext(Dispatchers.IO) {
-                        val importsDir = File(context.filesDir, "imported_dicts")
-                        if (!importsDir.exists()) importsDir.mkdirs()
-
-                        val identifierLine = context.contentResolver.openInputStream(it)?.bufferedReader()?.use { reader ->
-                            reader.readLine()
-                        }?.trim() ?: ""
-
-                        val existingFiles = importsDir.listFiles() ?: emptyArray()
-                        for (existingFile in existingFiles) {
-                            val existingFirstLine = existingFile.bufferedReader().use { reader -> reader.readLine() }?.trim() ?: ""
-                            if (existingFirstLine.isNotEmpty() && existingFirstLine == identifierLine) {
-                                existingFile.delete()
-                                TheLogKeeper.getInstance(context).log("INFO", "DictionarySettingsScreen", "DICT_IMPORT_DUPLICATE_REMOVED | old_file=[${existingFile.name}]")
-                            }
-                        }
-
-                        val fileName = "imported_${System.currentTimeMillis()}.txt"
-                        val destinationFile = File(importsDir, fileName)
-
-                        context.contentResolver.openInputStream(it)?.use { input ->
-                            destinationFile.outputStream().use { output ->
-                                input.copyTo(output)
-                            }
-                        }
-
-                        TheLogKeeper.getInstance(context).log("INFO", "DictionarySettingsScreen", "DICT_IMPORT_WRITE_COMPLETE | destination=[${destinationFile.absolutePath}] | size_bytes=[${destinationFile.length()}]")
-
-                        val importEngine = DictionaryEngine(context, autoLoad = false)
-                        importEngine.loadCombinedDictionary(destinationFile.inputStream(), destinationFile.name, destinationFile.length())
+                    withContext(Dispatchers.Main) {
+                        isProcessing = false
+                        Toast.makeText(context, "Import failed: ${e.message}", Toast.LENGTH_LONG).show()
                     }
-                    Toast.makeText(context, "Dictionary imported successfully.", Toast.LENGTH_LONG).show()
-                } catch (e: Exception) {
-                    TheLogKeeper.getInstance(context).log("INFO", "DictionarySettingsScreen", "DICT_IMPORT_FAILED | exception=[${e.javaClass.simpleName}] | message=[${e.message}]")
-                    Toast.makeText(context, "Failed to import dict: ${e.message}", Toast.LENGTH_SHORT).show()
-                } finally {
-                    withContext(Dispatchers.Main) { isImportingDictionary = false }
                 }
             }
         }
@@ -212,25 +200,24 @@ fun DictionarySettingsScreen(onClose: () -> Unit, onOpenPersonalDictionary: () -
             TopAppBar(
                 title = { Text("Dictionary & Prediction") },
                 navigationIcon = {
-                    IconButton(onClick = { if (!isImportingDictionary && !isMigratingDatabase) onClose() }) {
+                    IconButton(onClick = { if (!isProcessing) onClose() }) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 }
             )
         }
     ) { paddingValues ->
-        if (isImportingDictionary || isMigratingDatabase) {
+        if (isProcessing) {
             Box(
-                modifier = Modifier.fillMaxSize().padding(paddingValues),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(paddingValues),
                 contentAlignment = Alignment.Center
             ) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     CircularProgressIndicator()
                     Spacer(modifier = Modifier.height(16.dp))
-                    Text(
-                        if (isImportingDictionary) "Importing dictionary, please wait..."
-                        else "Building database, please wait..."
-                    )
+                    Text(processingMessage)
                 }
             }
         } else {
@@ -241,8 +228,88 @@ fun DictionarySettingsScreen(onClose: () -> Unit, onOpenPersonalDictionary: () -
                     .verticalScroll(rememberScrollState())
                     .padding(16.dp)
             ) {
-                Text("Auto-Correct Aggressiveness", style = MaterialTheme.typography.titleMedium)
-                Spacer(modifier = Modifier.height(8.dp))
+                Text("Multilingual & Dual Dictionary", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    "Enable dual language prediction like HeliBoard. The keyboard suggests words from your primary language while seamlessly predicting words from your secondary language when typing foreign terms.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // Primary Language
+                ExposedDropdownMenuBox(
+                    expanded = primaryExpanded,
+                    onExpandedChange = { primaryExpanded = !primaryExpanded }
+                ) {
+                    OutlinedTextField(
+                        value = supportedLanguages.find { it.first == primaryLanguage }?.second ?: primaryLanguage,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("Primary Language") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = primaryExpanded) },
+                        modifier = Modifier.menuAnchor().fillMaxWidth()
+                    )
+                    ExposedDropdownMenu(
+                        expanded = primaryExpanded,
+                        onDismissRequest = { primaryExpanded = false }
+                    ) {
+                        supportedLanguages.forEach { (code, name) ->
+                            DropdownMenuItem(
+                                text = { Text(name) },
+                                onClick = {
+                                    primaryLanguage = code
+                                    prefs.edit().putString("primary_language", code).apply()
+                                    primaryExpanded = false
+                                    TheLogKeeper.getInstance(context).log("INFO", "DictSettings", "PRIMARY_LANG_CHANGED | lang=$code")
+                                }
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Secondary Language
+                ExposedDropdownMenuBox(
+                    expanded = secondaryExpanded,
+                    onExpandedChange = { secondaryExpanded = !secondaryExpanded }
+                ) {
+                    OutlinedTextField(
+                        value = secondaryOptions.find { it.first == secondaryLanguage }?.second ?: secondaryLanguage,
+                        onValueChange = {},
+                        readOnly = true,
+                        label = { Text("Secondary Language (Multilingual Typing)") },
+                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = secondaryExpanded) },
+                        modifier = Modifier.menuAnchor().fillMaxWidth()
+                    )
+                    ExposedDropdownMenu(
+                        expanded = secondaryExpanded,
+                        onDismissRequest = { secondaryExpanded = false }
+                    ) {
+                        secondaryOptions.forEach { (code, name) ->
+                            DropdownMenuItem(
+                                text = { Text(name) },
+                                onClick = {
+                                    secondaryLanguage = code
+                                    prefs.edit().putString("secondary_language", code).apply()
+                                    secondaryExpanded = false
+                                    TheLogKeeper.getInstance(context).log("INFO", "DictSettings", "SECONDARY_LANG_CHANGED | lang=$code")
+                                }
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(24.dp))
+
+                Text("Correction & Prediction", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(12.dp))
+                
+                Text("Auto-Correct Aggressiveness", style = MaterialTheme.typography.bodyMedium)
                 Slider(
                     value = autoCorrectAggressiveness,
                     onValueChange = { 
@@ -258,11 +325,9 @@ fun DictionarySettingsScreen(onClose: () -> Unit, onOpenPersonalDictionary: () -
                     autoCorrectAggressiveness < 0.8f -> "Moderate"
                     else -> "Aggressive"
                 }
-                Text("Current level: $levelText")
+                Text("Current sensitivity: $levelText", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 
-                Spacer(modifier = Modifier.height(24.dp))
-                Text("Engine Selection", style = MaterialTheme.typography.titleMedium)
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(16.dp))
                 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -270,18 +335,18 @@ fun DictionarySettingsScreen(onClose: () -> Unit, onOpenPersonalDictionary: () -
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Text("Use Built-in Transformer Model")
+                        Text("Next-Word Prediction")
                         Text(
-                            "Enables lightweight neural next-word completions.",
+                            "Use bigrams and context to suggest the next word.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                     Switch(
-                        checked = useTransformerEngine,
+                        checked = nextWordPrediction,
                         onCheckedChange = {
-                            useTransformerEngine = it
-                            prefs.edit().putBoolean("use_transformer", it).apply()
+                            nextWordPrediction = it
+                            prefs.edit().putBoolean("next_word_prediction", it).apply()
                         }
                     )
                 }
@@ -290,124 +355,49 @@ fun DictionarySettingsScreen(onClose: () -> Unit, onOpenPersonalDictionary: () -
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(24.dp))
 
-                Text("HeliBoard Dictionaries & Backups", style = MaterialTheme.typography.titleMedium)
-                Spacer(modifier = Modifier.height(8.dp))
+                Text("HeliBoard Import & Backups", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    "Import entire HeliBoard backups (.zip) containing binary dictionaries (.dict) and personal dictionary entries (.tsv / .txt).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(12.dp))
                 
                 Button(
+                    onClick = { backupZipLauncher.launch(arrayOf("application/zip", "application/x-zip-compressed", "*/*")) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("Import HeliBoard Backup (.zip)")
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                
+                OutlinedButton(
                     onClick = { binaryDictLauncher.launch(arrayOf("*/*")) },
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Import HeliBoard Binary Dictionary (.dict)")
+                    Text("Import Binary Dictionary (.dict)")
                 }
 
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(24.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(24.dp))
+                
+                Text("Personal Dictionary & Prompts", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    "Review or edit your imported words, shortcuts, and text prompt templates.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                
                 OutlinedButton(
-                    onClick = { backupLauncher.launch(arrayOf("*/*")) },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Import Personal Dict Backup (.tsv / .txt / .json)")
-                }
-
-                Spacer(modifier = Modifier.height(24.dp))
-                HorizontalDivider()
-                Spacer(modifier = Modifier.height(24.dp))
-                
-                Text("Legacy Word Lists", style = MaterialTheme.typography.titleMedium)
-                Spacer(modifier = Modifier.height(8.dp))
-                
-                Button(
-                    onClick = { textDictLauncher.launch(arrayOf("text/plain")) },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Import Plain Text Word List (.txt)")
-                }
-
-                Spacer(modifier = Modifier.height(8.dp))
-                Button(
-                    onClick = {
-                        scope.launch {
-                            val importsDir = File(context.filesDir, "imported_dicts")
-                            val existingFile = importsDir.listFiles()?.firstOrNull()
-                            if (existingFile == null) {
-                                Toast.makeText(context, "Import a dictionary first.", Toast.LENGTH_SHORT).show()
-                                return@launch
-                            }
-                            try {
-                                withContext(Dispatchers.Main) {
-                                    isMigratingDatabase = true
-                                }
-                                withContext(Dispatchers.IO) {
-                                    val migrationEngine = DictionaryEngine(context, autoLoad = false)
-                                    migrationEngine.migrateWordsToDatabase(existingFile.inputStream())
-                                }
-                                Toast.makeText(context, "Database build complete.", Toast.LENGTH_LONG).show()
-                            } catch (e: Exception) {
-                                TheLogKeeper.getInstance(context).log("INFO", "DictionarySettingsScreen", "DB_MIGRATION_FAILED | exception=[${e.javaClass.simpleName}] | message=[${e.message}]")
-                                Toast.makeText(context, "Database build failed: ${e.message}", Toast.LENGTH_SHORT).show()
-                            } finally {
-                                withContext(Dispatchers.Main) {
-                                    isMigratingDatabase = false
-                                }
-                            }
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Build Fast Lookup Database (Step 2)")
-                }
-                
-                Spacer(modifier = Modifier.height(24.dp))
-                HorizontalDivider()
-                Spacer(modifier = Modifier.height(24.dp))
-                
-                Text("Custom Transformer Model (Advanced)", style = MaterialTheme.typography.titleMedium)
-                Spacer(modifier = Modifier.height(8.dp))
-                
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            "You can override the built-in 3MB model by importing your own TensorFlow Lite model (.tflite) and vocabulary file (.txt).",
-                            style = MaterialTheme.typography.bodyMedium
-                        )
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            "If you import a custom model, the built-in model will be disabled automatically.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-                
-                Spacer(modifier = Modifier.height(16.dp))
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(
-                        onClick = { tfliteLauncher.launch(arrayOf("*/*")) },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Import .tflite")
-                    }
-                    OutlinedButton(
-                        onClick = { vocabLauncher.launch(arrayOf("text/plain")) },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Import Vocab")
-                    }
-                }
-                
-                Spacer(modifier = Modifier.height(24.dp))
-                HorizontalDivider()
-                Spacer(modifier = Modifier.height(24.dp))
-                
-                Text("Personal Dictionary", style = MaterialTheme.typography.titleMedium)
-                Spacer(modifier = Modifier.height(8.dp))
-                Button(
                     onClick = onOpenPersonalDictionary,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Manage Custom Words & Prompts")
+                    Text("Manage Words & Prompts")
                 }
             }
         }

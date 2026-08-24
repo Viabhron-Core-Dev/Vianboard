@@ -12,8 +12,14 @@ interface WordDao {
     @Query("SELECT * FROM words WHERE word LIKE :prefix || '%' ORDER BY frequency DESC LIMIT 3")
     fun getSuggestions(prefix: String): Flow<List<WordEntity>>
 
+    @Query("SELECT * FROM words")
+    fun getAllWordsSync(): List<WordEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertWord(word: WordEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    fun insertSync(word: WordEntity)
 
     @Query("SELECT * FROM words WHERE word = :word")
     suspend fun getWord(word: String): WordEntity?
@@ -29,8 +35,14 @@ interface WordDao {
         }
     }
 
+    @Query("SELECT * FROM bigrams")
+    fun getAllBigramsSync(): List<BigramEntity>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertBigram(bigram: BigramEntity)
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    fun insertBigramSync(bigram: BigramEntity)
 
     @Query("SELECT * FROM bigrams WHERE word1 = :word1 AND word2 = :word2")
     suspend fun getBigram(word1: String, word2: String): BigramEntity?

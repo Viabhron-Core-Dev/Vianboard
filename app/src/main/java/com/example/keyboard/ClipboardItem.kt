@@ -9,5 +9,6 @@ data class ClipboardItem(
     val id: Long = 0,
     val text: String,
     var isPinned: Boolean = false,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val isSensitive: Boolean = false
 )

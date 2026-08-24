@@ -18,6 +18,7 @@ object ToolbarSettingsManager {
     val ALL_ACTIONS = listOf(
         ToolbarAction("VOICE_INPUT", "Voice input", R.drawable.ic_mic),
         ToolbarAction("CLIPBOARD", "Clipboard", R.drawable.ic_clipboard),
+        ToolbarAction("PROMPT_LIST", "Prompt List", R.drawable.ic_prompt),
         ToolbarAction("UNDO", "Undo", R.drawable.ic_undo),
         ToolbarAction("REDO", "Redo", R.drawable.ic_redo),
         ToolbarAction("SETTINGS", "Settings", R.drawable.ic_settings),
@@ -37,9 +38,9 @@ object ToolbarSettingsManager {
     )
     
     // Default Pinned
-    private val DEFAULT_PINNED = listOf("ENTER", "PASTE")
+    private val DEFAULT_PINNED = listOf("SELECT_WORD", "COPY", "CLIPBOARD")
     // Default Expanded (the items in the toolbar popup)
-    private val DEFAULT_TOOLBAR = listOf("VOICE_INPUT", "CLIPBOARD", "UNDO", "REDO", "SETTINGS", "SELECT_ALL", "SELECT_WORD", "COPY", "CUT", "PASTE")
+    private val DEFAULT_TOOLBAR = listOf("INCOGNITO", "PROMPT_LIST", "VOICE_INPUT", "UNDO", "REDO", "SETTINGS", "SELECT_ALL", "CUT", "PASTE", "ENTER", "EMOJI")
 
     fun getPinnedKeys(context: Context): List<String> {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
