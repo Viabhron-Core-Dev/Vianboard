@@ -174,9 +174,7 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
                 toggleClipboardModal()
             },
             onItemLongClicked = { item ->
-                coroutineScope.launch(Dispatchers.IO) {
-                    clipboardRepository.togglePin(item)
-                }
+                showClipboardContextMenu(item)
             }
         )
         recycler.adapter = clipboardAdapter
@@ -211,6 +209,47 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
         }
     }
     
+    private fun showClipboardContextMenu(item: ClipboardItem) {
+        val pinAction = if (item.isPinned) "Unpin" else "Pin to Top"
+        val options = arrayOf(pinAction, "Add to Prompt List", "Delete")
+        
+        val builder = android.app.AlertDialog.Builder(this)
+        builder.setTitle("Clipboard Item")
+        builder.setItems(options) { _, which ->
+            when (which) {
+                0 -> {
+                    coroutineScope.launch(Dispatchers.IO) {
+                        clipboardRepository.togglePin(item)
+                    }
+                }
+                1 -> {
+                    coroutineScope.launch(Dispatchers.IO) {
+                        ClipboardDatabase.getDatabase(this@ViaboardService).personalDictionaryDao().insert(
+                            PersonalDictionaryItem(word = item.text, frequency = 250)
+                        )
+                        logKeeper.log("USER_ACTION", "Clipboard", "ADD_TO_PROMPT | text=${item.text}")
+                    }
+                    android.widget.Toast.makeText(this, "Added to Prompt List", android.widget.Toast.LENGTH_SHORT).show()
+                }
+                2 -> {
+                    coroutineScope.launch(Dispatchers.IO) {
+                        clipboardRepository.delete(item)
+                    }
+                }
+            }
+        }
+        val dialog = builder.create()
+        val window = dialog.window
+        if (window != null) {
+            val params = window.attributes
+            params.token = mainView?.windowToken
+            params.type = android.view.WindowManager.LayoutParams.TYPE_APPLICATION_ATTACHED_DIALOG
+            window.attributes = params
+            window.addFlags(android.view.WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM)
+        }
+        dialog.show()
+    }
+
     private fun onPrimaryClipChanged() {
         val clip = clipboardManager?.primaryClip
         if (clip != null && clip.itemCount > 0) {
@@ -247,9 +286,16 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
             val recycler = mainView?.findViewById<androidx.recyclerview.widget.RecyclerView>(R.id.emoji_recycler)
             if (recycler?.adapter == null) {
                 recycler?.layoutManager = androidx.recyclerview.widget.GridLayoutManager(this, 7)
-                emojiAdapter = EmojiAdapter(getSmileysEmojis()) { emoji ->
-                    currentInputConnection?.commitText(emoji, 1)
-                }
+                emojiAdapter = EmojiAdapter(
+                    emojis = com.example.keyboard.emoji.EmojiDataProvider.SMILEYS,
+                    onClick = { emoji ->
+                        currentInputConnection?.commitText(emoji, 1)
+                        com.example.keyboard.emoji.EmojiDataProvider.addRecent(this, emoji)
+                    },
+                    onLongClick = { emoji, view ->
+                        showSkinTonePopup(emoji, view)
+                    }
+                )
                 recycler?.adapter = emojiAdapter
                 
                 mainView?.findViewById<android.view.View>(R.id.btn_emoji_abc)?.setOnClickListener {
@@ -268,10 +314,40 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
         }
     }
     
-    private fun getSmileysEmojis(): List<String> {
-        return listOf(
-            "😀", "😃", "😄", "😁", "😆", "😅", "😂", "🤣", "🥲", "☺️", "😊", "😇", "🙂", "🙃", "😉", "😌", "😍", "🥰", "😘", "😗", "😙", "😚", "😋", "😛", "😝", "😜", "🤪", "🤨", "🧐", "🤓", "😎", "🥸", "🤩", "🥳", "😏", "😒", "😞", "😔", "😟", "😕", "🙁", "☹️", "😣", "😖", "😫", "😩", "🥺", "😢", "😭", "😮‍💨", "😤", "😠", "😡", "🤬", "🤯", "😳", "🥵", "🥶", "😱", "😨", "😰", "😥", "😓", "🤫", "🤭", "🥱", "🤗", "🫣", "🤔", "🫡", "🤐", "🤨", "😐", "😑", "😶", "😶‍🌫️", "😏", "😒", "🙄", "😬", "😮", "😦", "😧", "😲", "🥱", "😴", "🤤", "😪", "😵", "😵‍💫", "🤐", "🥴", "🤢", "🤮", "🤧", "😷", "🤒", "🤕", "🤑", "🤠", "😈", "👿", "👹", "👺", "🤡", "💩", "👻", "💀", "☠️", "👽", "👾", "🤖", "🎃", "😺", "😸", "😹", "😻", "😼", "😽", "🙀", "😿", "😾"
+    private fun showSkinTonePopup(baseEmoji: String, anchorView: View) {
+        val variations = com.example.keyboard.emoji.EmojiDataProvider.getSkinToneVariations(baseEmoji) ?: return
+        val linearLayout = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.HORIZONTAL
+            setPadding(16, 12, 16, 12)
+            setBackgroundColor(android.graphics.Color.parseColor("#333333"))
+        }
+        val popupWindow = android.widget.PopupWindow(
+            linearLayout,
+            android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+            android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+            true
         )
+        popupWindow.isOutsideTouchable = true
+
+        for (v in variations) {
+            val tv = android.widget.TextView(this).apply {
+                text = v
+                textSize = 22f
+                setPadding(14, 8, 14, 8)
+                setOnClickListener {
+                    currentInputConnection?.commitText(v, 1)
+                    com.example.keyboard.emoji.EmojiDataProvider.addRecent(this@ViaboardService, v)
+                    popupWindow.dismiss()
+                }
+            }
+            linearLayout.addView(tv)
+        }
+
+        try {
+            popupWindow.showAsDropDown(anchorView, 0, -anchorView.height * 2)
+        } catch (e: Exception) {
+            currentInputConnection?.commitText(baseEmoji, 1)
+        }
     }
     
     private fun setupEmojiCategories() {
@@ -279,22 +355,35 @@ class ViaboardService : InputMethodService(), KeyboardView.KeyboardListener, Des
         container.removeAllViews()
         
         val categories = listOf(
-            Pair("ic_emoji_smileys_emotion", "Smileys")
-            // Can add more later
+            Pair("ic_emoji_recents", "Recents") to { com.example.keyboard.emoji.EmojiDataProvider.getRecents(this) },
+            Pair("ic_emoji_smileys_emotion", "Smileys") to { com.example.keyboard.emoji.EmojiDataProvider.SMILEYS },
+            Pair("ic_emoji_people_body", "People") to { com.example.keyboard.emoji.EmojiDataProvider.PEOPLE },
+            Pair("ic_emoji_animals_nature", "Animals") to { com.example.keyboard.emoji.EmojiDataProvider.ANIMALS },
+            Pair("ic_emoji_food_drink", "Food") to { com.example.keyboard.emoji.EmojiDataProvider.FOOD },
+            Pair("ic_emoji_activities", "Activities") to { com.example.keyboard.emoji.EmojiDataProvider.ACTIVITIES },
+            Pair("ic_emoji_travel_places", "Travel") to { com.example.keyboard.emoji.EmojiDataProvider.TRAVEL },
+            Pair("ic_emoji_objects", "Objects") to { com.example.keyboard.emoji.EmojiDataProvider.OBJECTS },
+            Pair("ic_emoji_symbols", "Symbols") to { com.example.keyboard.emoji.EmojiDataProvider.SYMBOLS },
+            Pair("ic_emoji_flags", "Flags") to { com.example.keyboard.emoji.EmojiDataProvider.FLAGS }
         )
         
         val typedValue = android.util.TypedValue()
         theme.resolveAttribute(android.R.attr.selectableItemBackground, typedValue, true)
         
-        for (cat in categories) {
+        for ((cat, getList) in categories) {
             val resId = resources.getIdentifier(cat.first, "drawable", packageName)
             val ib = android.widget.ImageButton(this).apply {
-                layoutParams = android.widget.LinearLayout.LayoutParams(120, android.view.ViewGroup.LayoutParams.MATCH_PARENT)
-                setImageResource(resId)
+                layoutParams = android.widget.LinearLayout.LayoutParams(110, android.view.ViewGroup.LayoutParams.MATCH_PARENT)
+                setImageResource(if (resId != 0) resId else R.drawable.ic_emoji_smileys_emotion)
                 setBackgroundResource(typedValue.resourceId)
-                setPadding(16, 16, 16, 16)
+                setPadding(12, 12, 12, 12)
                 scaleType = android.widget.ImageView.ScaleType.CENTER_INSIDE
                 contentDescription = cat.second
+                setOnClickListener {
+                    val emojis = getList()
+                    emojiAdapter?.updateData(emojis)
+                    mainView?.findViewById<androidx.recyclerview.widget.RecyclerView>(R.id.emoji_recycler)?.scrollToPosition(0)
+                }
             }
             container.addView(ib)
         }

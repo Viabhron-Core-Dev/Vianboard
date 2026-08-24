@@ -93,6 +93,28 @@ class BinaryDictionary(
         }
     }
 
+    fun loadFromBinaryStream(stream: java.io.InputStream) {
+        stream.use { input ->
+            val dataInput = java.io.DataInputStream(input)
+            val magic = ByteArray(4)
+            dataInput.readFully(magic)
+            val magicStr = String(magic)
+            if (magicStr != "DICT") {
+                throw IllegalArgumentException("Invalid dictionary magic: $magicStr")
+            }
+            val version = dataInput.readUnsignedShort()
+            val wordCount = dataInput.readInt()
+            for (i in 0 until wordCount) {
+                val len = dataInput.readUnsignedByte()
+                val wordBytes = ByteArray(len)
+                dataInput.readFully(wordBytes)
+                val freq = dataInput.readUnsignedByte()
+                val word = String(wordBytes, Charsets.UTF_8)
+                insertWord(word, freq)
+            }
+        }
+    }
+
     suspend fun loadDictionary() = withContext(Dispatchers.IO) {
         val startTime = System.currentTimeMillis()
         try {

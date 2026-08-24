@@ -148,6 +148,10 @@ class DictionaryFacilitator(private val context: Context) {
         }
     }
 
+    fun loadUserBinaryDictionary(stream: java.io.InputStream) {
+        mainDictionary.loadFromBinaryStream(stream)
+    }
+
     fun close() {
         mainDictionary.close()
         personalWordsCache.clear()

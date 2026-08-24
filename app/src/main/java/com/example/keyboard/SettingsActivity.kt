@@ -32,10 +32,7 @@ class SettingsActivity : ComponentActivity() {
             var currentRoute by remember { mutableStateOf<SettingsRoute>(SettingsRoute.Main) }
 
             BackHandler(enabled = currentRoute != SettingsRoute.Main) {
-                currentRoute = when (currentRoute) {
-                    SettingsRoute.PersonalDictionary -> SettingsRoute.DictionarySettings
-                    else -> SettingsRoute.Main
-                }
+                currentRoute = SettingsRoute.Main
             }
 
             MaterialTheme {
@@ -61,8 +58,16 @@ class SettingsActivity : ComponentActivity() {
                                 ) {
                                     item {
                                         ListItem(
+                                            headlineContent = { Text("Personal Dictionary & Prompts") },
+                                            supportingContent = { Text("Manage custom words, shortcuts, and prompt templates") },
+                                            modifier = Modifier.clickable { currentRoute = SettingsRoute.PersonalDictionary }
+                                        )
+                                        HorizontalDivider()
+                                    }
+                                    item {
+                                        ListItem(
                                             headlineContent = { Text("Dictionary & Prediction") },
-                                            supportingContent = { Text("Configure dictionary and auto-correct") },
+                                            supportingContent = { Text("Configure dictionary, .dict import, and auto-correct") },
                                             modifier = Modifier.clickable { currentRoute = SettingsRoute.DictionarySettings }
                                         )
                                         HorizontalDivider()
@@ -96,7 +101,7 @@ class SettingsActivity : ComponentActivity() {
                             )
                         }
                         is SettingsRoute.PersonalDictionary -> {
-                            PersonalDictionaryScreen(onClose = { currentRoute = SettingsRoute.DictionarySettings })
+                            PersonalDictionaryScreen(onClose = { currentRoute = SettingsRoute.Main })
                         }
                         is SettingsRoute.LogKeeper -> {
                             LogKeeperScreen(onClose = { currentRoute = SettingsRoute.Main })

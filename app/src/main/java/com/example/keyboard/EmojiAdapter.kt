@@ -7,7 +7,11 @@ import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 import com.example.R
 
-class EmojiAdapter(private var emojis: List<String>, private val onClick: (String) -> Unit) : RecyclerView.Adapter<EmojiAdapter.ViewHolder>() {
+class EmojiAdapter(
+    private var emojis: List<String>,
+    private val onClick: (String) -> Unit,
+    private val onLongClick: ((String, View) -> Unit)? = null
+) : RecyclerView.Adapter<EmojiAdapter.ViewHolder>() {
 
     class ViewHolder(view: View) : RecyclerView.ViewHolder(view) {
         val textView: TextView = view.findViewById(android.R.id.text1)
@@ -19,8 +23,17 @@ class EmojiAdapter(private var emojis: List<String>, private val onClick: (Strin
     }
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
-        holder.textView.text = emojis[position]
-        holder.itemView.setOnClickListener { onClick(emojis[position]) }
+        val emoji = emojis[position]
+        holder.textView.text = emoji
+        holder.itemView.setOnClickListener { onClick(emoji) }
+        holder.itemView.setOnLongClickListener { v ->
+            if (onLongClick != null) {
+                onLongClick.invoke(emoji, v)
+                true
+            } else {
+                false
+            }
+        }
     }
 
     override fun getItemCount() = emojis.size
